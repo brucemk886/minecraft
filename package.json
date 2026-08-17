@@ -1,0 +1,51 @@
+{
+  "name": "mc-parkour-sim",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Minecraft-style parkour simulator for Reddit/Shorts videos",
+  "author": "ParkourSim",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "desktop": "concurrently -k \"vite\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "test": "node --test tests/*.test.mjs",
+    "build": "vite build",
+    "pack": "vite build && powershell -ExecutionPolicy Bypass -File scripts/pack-portable.ps1",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12",
+    "vite": "^6.2.0",
+    "wait-on": "^8.0.4"
+  },
+  "build": {
+    "appId": "com.parkour.simulator",
+    "productName": "方块跑酷模拟器",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "runtime/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "ParkourSim-Portable.exe"
+    }
+  }
+}

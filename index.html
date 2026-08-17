@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>方块跑酷模拟器</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="panel" class="panel">
+        <h1>方块跑酷模拟器</h1>
+        <p class="sub">桌面 EXE · 真实 Java 版画面 · 自动跑酷录制</p>
+
+        <label>画面引擎</label>
+        <select id="engine">
+          <option value="minecraft" selected>真实 Minecraft Java（推荐）</option>
+          <option value="simulator">内置模拟预览（旧版）</option>
+        </select>
+
+        <section id="realSetup" class="setup-card">
+          <div class="setup-title">真实引擎状态</div>
+          <div class="setup-row"><span>Java 26.2</span><b id="gameState">检测中</b></div>
+          <div class="setup-row"><span>Fabric + 跑酷导演</span><b id="modState">检测中</b></div>
+          <div class="setup-row"><span>免费光影 + 性能优化</span><b id="graphicsState">检测中</b></div>
+          <p id="realGuide" class="guide">先在 Launcher 启动 Java 最新版本一次，再回来安装/修复整套引擎。</p>
+          <div class="setup-actions">
+            <button id="btnDetect" class="ghost small">重新检测</button>
+            <button id="btnInstall" class="primary small">安装/修复整套引擎</button>
+          </div>
+          <div class="setup-actions">
+            <button id="btnLauncher" class="ghost small">打开 Launcher</button>
+            <button id="btnShaders" class="ghost small">查看光影官网</button>
+          </div>
+          <label for="realTheme">单条视频主题</label>
+          <select id="realTheme">
+            <option value="village" selected>村庄花园</option>
+            <option value="library">高层图书馆</option>
+            <option value="lava">熔岩峡谷</option>
+            <option value="lush">繁茂洞穴</option>
+            <option value="checker">红白花园</option>
+            <option value="honey">蜂巢矿洞</option>
+            <option value="cherry">樱花高塔</option>
+            <option value="ice">冰晶宫殿</option>
+            <option value="nether">下界熔炉</option>
+            <option value="crystal">紫晶花园</option>
+            <option value="random">每次随机一个主题</option>
+          </select>
+          <label for="realDuration">单条视频时长</label>
+          <select id="realDuration">
+            <option value="120">2 分钟</option>
+            <option value="150">2 分 30 秒</option>
+            <option value="180">3 分钟</option>
+            <option value="300">5 分钟</option>
+            <option value="600" selected>10 分钟</option>
+            <option value="900">15 分钟</option>
+          </select>
+          <label for="realBatchCount">自动连续生成</label>
+          <select id="realBatchCount">
+            <option value="1" selected>1 条</option>
+            <option value="3">3 条</option>
+            <option value="5">5 条</option>
+            <option value="10">10 条</option>
+          </select>
+          <p class="key-tip">保持 Minecraft 在单人世界内，点“自动生成并录制”即可。程序会为每条视频生成新种子、新路线，等开头场景就绪后开始录制，完成后自动保存并继续下一条。</p>
+        </section>
+
+        <div id="simControls" class="hidden">
+
+        <label>场景</label>
+        <select id="theme">
+          <option value="tour">高速多场景循环（推荐）</option>
+          <option value="village">村庄草地</option>
+          <option value="library">木质书房</option>
+          <option value="canyon">砂岩峡谷</option>
+          <option value="cave">洞穴熔岩</option>
+          <option value="checker">红白棋盘墙</option>
+          <option value="honey">蜂巢矿洞</option>
+          <option value="sunset">黄昏高塔</option>
+        </select>
+
+        <label>模式</label>
+        <select id="mode">
+          <option value="auto">自动跑酷（适合录制）</option>
+          <option value="manual">手动游玩 WASD + 空格</option>
+        </select>
+
+        <label>画幅</label>
+        <select id="aspect">
+          <option value="vertical">竖屏 9:16</option>
+          <option value="landscape">横屏 16:9</option>
+        </select>
+
+        <label>分辨率</label>
+        <select id="resolution">
+          <option value="720">720 × 1280</option>
+          <option value="1080">1080 × 1920</option>
+        </select>
+
+        <label>录制时长</label>
+        <select id="duration">
+          <option value="30">30 秒</option>
+          <option value="60">1 分钟</option>
+          <option value="120" selected>2 分钟</option>
+          <option value="180">3 分钟</option>
+          <option value="0">手动停止</option>
+        </select>
+
+        <label>种子</label>
+        <input id="seed" type="text" value="parkour" />
+        </div>
+
+        <label for="clipDirectory">视频保存目录</label>
+        <div class="folder-picker">
+          <input id="clipDirectory" type="text" value="正在读取…" readonly />
+          <button id="btnChooseClipDirectory" class="ghost small">选择目录</button>
+        </div>
+
+        <div class="actions">
+          <button id="btnStart" class="primary">预览窗口</button>
+          <button id="btnRecord" class="accent">录制真实画面</button>
+        </div>
+        <button id="btnHalt" class="danger">停止</button>
+        <button id="btnFolder" class="ghost">打开视频文件夹</button>
+        <button id="btnMcFolder" class="ghost">打开 .minecraft 文件夹</button>
+        <p id="status" class="status"></p>
+      </aside>
+
+      <main class="stage">
+        <div id="phone" class="phone">
+          <canvas id="view"></canvas>
+          <canvas id="realView" class="hidden"></canvas>
+          <div id="hint" class="hint hidden">点击画面锁定鼠标 · ESC 解锁</div>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

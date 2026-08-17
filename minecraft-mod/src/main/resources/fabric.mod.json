@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "parkour_director",
+  "version": "${version}",
+  "name": "ParkourSim Real Director",
+  "description": "Builds seven real Minecraft parkour stages and drives a smooth first-person camera for vertical videos.",
+  "authors": ["ParkourSim"],
+  "license": "CC0-1.0",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["com.parkoursim.director.ParkourDirectorMod"],
+    "client": ["com.parkoursim.director.client.ParkourDirectorClient"]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "~26.2",
+    "java": ">=25",
+    "fabric-api": "*"
+  }
+}

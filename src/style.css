@@ -1,0 +1,299 @@
+:root {
+  --bg: #0e1116;
+  --panel: #171c24;
+  --line: #2a3340;
+  --text: #e8eef6;
+  --muted: #93a0b3;
+  --accent: #3ddc84;
+  --primary: #4c8dff;
+  --danger: #ff6b6b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+#app {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  height: 100%;
+}
+
+.panel {
+  padding: 22px 20px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  overflow: auto;
+}
+
+.panel h1 {
+  margin: 0 0 6px;
+  font-size: 22px;
+}
+
+.sub {
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.setup-card {
+  margin: 12px 0 4px;
+  padding: 12px;
+  border: 1px solid #30445a;
+  border-radius: 10px;
+  background: linear-gradient(145deg, #111a24, #10151c);
+}
+
+.setup-title {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.setup-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.setup-row b {
+  color: #f0b85b;
+}
+
+.setup-row b.ready {
+  color: var(--accent);
+}
+
+.guide,
+.key-tip {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.key-tip b {
+  color: #fff;
+}
+
+.setup-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+button.small {
+  margin: 0;
+  padding: 7px 8px;
+  font-size: 12px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  filter: grayscale(0.8);
+  opacity: 0.48;
+}
+
+label {
+  display: block;
+  margin: 12px 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+  color: var(--text);
+}
+
+input,
+select,
+textarea,
+button {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: #10151c;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 9px 10px;
+  font: inherit;
+}
+
+textarea {
+  resize: vertical;
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+button {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button.primary {
+  background: var(--primary);
+  border-color: transparent;
+  color: #fff;
+}
+
+button.accent {
+  background: var(--accent);
+  border-color: transparent;
+  color: #083318;
+}
+
+button.danger {
+  margin-top: 8px;
+  background: var(--danger);
+  border-color: transparent;
+  color: #fff;
+}
+
+button.ghost {
+  margin-top: 8px;
+  background: transparent;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.status {
+  min-height: 20px;
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.stage {
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(circle at 50% 20%, #1c2633 0%, transparent 45%),
+    #0b0e13;
+}
+
+.phone {
+  position: relative;
+  width: min(42vh, 420px);
+  aspect-ratio: 9 / 16;
+  background: #000;
+  border-radius: 18px;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+}
+
+.phone.landscape {
+  width: min(78vw, 960px);
+  aspect-ratio: 16 / 9;
+}
+
+#view,
+#realView {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.folder-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 78px;
+  gap: 7px;
+}
+
+.folder-picker input {
+  min-width: 0;
+  color: #c9d6e6;
+  font-size: 11px;
+}
+
+.folder-picker button {
+  margin: 0;
+}
+
+.reddit-card {
+  position: absolute;
+  left: 7%;
+  right: 7%;
+  top: 9%;
+  background: rgba(22, 24, 28, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 14px 14px 12px;
+  color: #fff;
+  backdrop-filter: blur(8px);
+}
+
+.reddit-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #d4d8de;
+}
+
+.snoo {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #fff 0 18%, #ff4500 19% 100%);
+}
+
+.reddit-card p {
+  margin: 10px 0 12px;
+  font-size: 18px;
+  line-height: 1.35;
+  font-weight: 700;
+}
+
+.reddit-meta {
+  display: flex;
+  gap: 14px;
+  font-size: 12px;
+  color: #b8c0cc;
+}
+
+.hint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 18px;
+  text-align: center;
+  color: #fff;
+  text-shadow: 0 2px 8px #000;
+  font-size: 13px;
+}
+
+@media (max-width: 900px) {
+  #app {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+
+  .panel {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+}

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+release/
+ref_frames/
+ref_frames2/
+runtime/
+minecraft-mod/.gradle/
+minecraft-mod/build/
+*.log
+*.webm
+*.mp4
+.DS_Store
+Thumbs.db
