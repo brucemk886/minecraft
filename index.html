@@ -34,15 +34,15 @@
           </div>
           <label for="realTheme">单条视频主题</label>
           <select id="realTheme">
-            <option value="random" selected>每次随机 100 套模板（前100条不重复）</option>
+            <option value="random" selected>每日轮换 60 个主题 · 300 套模板</option>
           </select>
           <label for="realDuration">单条视频时长</label>
           <select id="realDuration">
-            <option value="120">2 分钟</option>
+            <option value="120" selected>2 分钟</option>
             <option value="150">2 分 30 秒</option>
             <option value="180">3 分钟</option>
             <option value="300">5 分钟</option>
-            <option value="600" selected>10 分钟</option>
+            <option value="600">10 分钟</option>
             <option value="900">15 分钟</option>
           </select>
           <label for="realBatchCount">自动连续生成</label>
@@ -59,7 +59,7 @@
             <button id="btnDiscardBatch" class="ghost small" disabled>放弃任务断点</button>
           </div>
           <p id="batchRecoveryStatus" class="key-tip">暂无未完成的批量任务。</p>
-          <p class="key-tip">保持 Minecraft 在单人世界内，点“自动生成并录制”即可。程序会为每条视频生成新种子、新路线，等开头场景就绪后开始录制，完成后自动保存并继续下一条。</p>
+          <p class="key-tip">保持 Minecraft 在单人世界内，点“自动生成并录制”即可。60 个主题各含 8 个专属子场景；每天自动更换主题排期和组合参数，并避开近 30 天重复内容。</p>
         </section>
 
         <div id="simControls" class="hidden">

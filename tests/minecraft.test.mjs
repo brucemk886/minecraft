@@ -20,21 +20,32 @@ import {
   MINECRAFT_TEMPLATE_STYLES,
   MINECRAFT_TEMPLATES,
   minecraftBaseTheme,
+  minecraftDailyTemplateOffset,
   minecraftTemplateForBatchIndex,
 } from "../src/minecraft-templates.js";
 
-test("Minecraft exposes 100 real templates and cycles without repeats", () => {
-  assert.equal(MINECRAFT_BASE_THEMES.length, 10);
-  assert.equal(MINECRAFT_TEMPLATE_STYLES.length, 10);
-  assert.equal(MINECRAFT_TEMPLATES.length, 100);
-  assert.equal(new Set(MINECRAFT_TEMPLATES.map((template) => template.id)).size, 100);
-  assert.equal(new Set(Array.from({ length: 100 }, (_, index) => minecraftTemplateForBatchIndex(index + 1, 17).id)).size, 100);
-  assert.equal(minecraftTemplateForBatchIndex(1, 17).id, minecraftTemplateForBatchIndex(101, 17).id);
-  assert.equal(minecraftBaseTheme("crystal-v10"), "crystal");
+test("Minecraft exposes 300 balanced templates across 60 themes", () => {
+  assert.equal(MINECRAFT_BASE_THEMES.length, 60);
+  assert.equal(MINECRAFT_TEMPLATE_STYLES.length, 5);
+  assert.equal(MINECRAFT_TEMPLATES.length, 300);
+  assert.equal(new Set(MINECRAFT_TEMPLATES.map((template) => template.id)).size, 300);
+  assert.equal(new Set(Array.from({ length: 300 }, (_, index) => minecraftTemplateForBatchIndex(index + 1, 17).id)).size, 300);
+  assert.equal(new Set(Array.from({ length: 60 }, (_, index) => minecraftTemplateForBatchIndex(index + 1, 17).baseTheme)).size, 60);
+  assert.equal(minecraftTemplateForBatchIndex(1, 17).id, minecraftTemplateForBatchIndex(301, 17).id);
+  const firstDayOffset = minecraftDailyTemplateOffset(new Date(2026, 7, 20));
+  const secondDayOffset = minecraftDailyTemplateOffset(new Date(2026, 7, 21));
+  const firstDay = new Set(Array.from({ length: 150 }, (_, index) => minecraftTemplateForBatchIndex(index + 1, firstDayOffset).id));
+  const secondDay = new Set(Array.from({ length: 150 }, (_, index) => minecraftTemplateForBatchIndex(index + 1, secondDayOffset).id));
+  assert.notEqual(firstDayOffset, secondDayOffset);
+  assert.equal([...firstDay].filter((id) => secondDay.has(id)).length, 0);
+  assert.equal(new Set([...firstDay, ...secondDay]).size, 300);
+  assert.equal(minecraftBaseTheme("crystal-v05"), "crystal");
+  assert.equal(minecraftBaseTheme("savanna-v05"), "savanna");
+  assert.equal(minecraftBaseTheme("stadium-v05"), "stadium");
   assert.equal(minecraftBaseTheme("library"), "library");
 });
 
-test("desktop and director pass all 100 template ids into distinct route structures", () => {
+test("desktop and director pass all 300 template ids into distinct route structures", () => {
   const mainSource = fs.readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
   const htmlSource = fs.readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const rendererSource = fs.readFileSync(new URL("../src/main.js", import.meta.url), "utf8");
@@ -46,18 +57,52 @@ test("desktop and director pass all 100 template ids into distinct route structu
     new URL("../minecraft-mod/src/main/java/com/parkoursim/director/CourseBuilder.java", import.meta.url),
     "utf8",
   );
-  assert.ok(htmlSource.includes("每次随机 100 套模板（前100条不重复）"));
+  assert.ok(htmlSource.includes("每日轮换 60 个主题 · 300 套模板"));
   assert.ok(rendererSource.includes("initializeMinecraftTemplateOptions"));
   assert.ok(rendererSource.includes("minecraftTemplateForBatchIndex(index, templateOffset)"));
   assert.ok(rendererSource.includes("templateOffset"));
   assert.ok(mainSource.includes("TEMPLATE_ID_PATTERN"));
   assert.ok(mainSource.includes("isRealTheme"));
-  assert.ok(directorSource.includes("TEMPLATE_COUNT = 100"));
+  assert.ok(directorSource.includes("TEMPLATE_COUNT = 300"));
+  assert.ok(directorSource.includes("TEMPLATE_VARIANTS_PER_THEME = 5"));
   assert.ok(directorSource.includes("CourseBuilder.isTemplateId(normalized)"));
   assert.ok(directorSource.includes('String.format("%s-v%02d"'));
   assert.ok(builderSource.includes("decorateTemplateVariant(stage)"));
   assert.ok(builderSource.includes("templateVariant(String theme)"));
   assert.ok(builderSource.includes("templateVariant * 0x94D049BB133111EBL"));
+});
+
+test("all 60 themes expose eight dedicated sub-scenes in continuous curated cycles", () => {
+  const builderSource = fs.readFileSync(
+    new URL("../minecraft-mod/src/main/java/com/parkoursim/director/CourseBuilder.java", import.meta.url),
+    "utf8",
+  );
+  assert.ok(builderSource.includes("SUBSCENES_PER_THEME = 8"));
+  assert.ok(builderSource.includes("SUBSCENE_ORDERS"));
+  assert.ok(builderSource.includes("decorateThemeSubscene(stage, normalizedTheme, subscene)"));
+  assert.ok(builderSource.includes("renameLatestStage(normalizedTheme, subscene)"));
+  assert.ok(builderSource.includes("return SUBSCENE_ORDERS[orderIndex][position]"));
+  for (const theme of MINECRAFT_BASE_THEMES) {
+    const line = builderSource.split(/\r?\n/).find((candidate) => candidate.includes(`case "${theme.id}" -> new String[]`));
+    assert.ok(line, `missing sub-scenes for ${theme.id}`);
+    assert.equal((line.match(/"[^"]+"/g) || []).length, 9, `${theme.id} should have exactly eight named sub-scenes`);
+  }
+  const orders = [
+    [0, 1, 2, 3, 4, 5, 6, 7],
+    [0, 2, 1, 4, 3, 6, 5, 7],
+    [0, 3, 1, 5, 2, 6, 4, 7],
+    [0, 1, 4, 2, 5, 3, 6, 7],
+    [0, 4, 1, 3, 2, 5, 6, 7],
+    [0, 2, 4, 1, 5, 3, 6, 7],
+    [0, 3, 2, 4, 1, 6, 5, 7],
+    [0, 1, 3, 5, 2, 4, 6, 7],
+  ];
+  for (const order of orders) {
+    assert.equal(new Set(order).size, 8);
+    assert.equal(order[0], 0);
+    assert.equal(order.at(-1), 7);
+    assert.ok(builderSource.includes(`{${order.join(", ")}}`));
+  }
 });
 
 test("visual watchdog distinguishes a frozen frame from meaningful movement", () => {
@@ -202,7 +247,8 @@ test("real workflow supports long one-way seeded jobs and automatic batches", ()
   assert.ok(mainSource.includes('ipcMain.handle("start-parkour-job"'));
   assert.ok(mainSource.includes('ipcMain.handle("get-parkour-status"'));
   assert.ok(preloadSource.includes("startParkourJob"));
-  assert.ok(htmlSource.includes('<option value="600" selected>'));
+  assert.ok(htmlSource.includes('<option value="120" selected>'));
+  assert.ok(htmlSource.includes('<option value="600">'));
   assert.ok(htmlSource.includes('<option value="900">'));
   assert.ok(htmlSource.includes('id="realBatchCount" type="number"'));
   assert.ok(htmlSource.includes('max="999"'));
@@ -246,8 +292,8 @@ test("overnight batches detect stalls, discard bad clips, and keep a resumable c
   const rendererSource = fs.readFileSync(new URL("../src/main.js", import.meta.url), "utf8");
   const captureSource = fs.readFileSync(new URL("../src/minecraft.js", import.meta.url), "utf8");
   assert.ok(mainSource.includes("status.statusFileAgeMs"));
-  assert.ok(rendererSource.includes("PARKOUR_HEARTBEAT_TIMEOUT_MS = 15_000"));
-  assert.ok(rendererSource.includes("PARKOUR_VISUAL_FREEZE_TIMEOUT_MS = 15_000"));
+  assert.ok(rendererSource.includes("PARKOUR_HEARTBEAT_TIMEOUT_MS = 60_000"));
+  assert.ok(rendererSource.includes("PARKOUR_VISUAL_FREEZE_TIMEOUT_MS = 60_000"));
   assert.ok(rendererSource.includes("monitorParkourRecording"));
   assert.ok(rendererSource.includes("minecraftRecorder.discard()"));
   assert.ok(captureSource.includes("visualIdleMilliseconds()"));
@@ -257,6 +303,79 @@ test("overnight batches detect stalls, discard bad clips, and keep a resumable c
   assert.ok(rendererSource.includes("pauseBatchCheckpoint"));
   assert.ok(htmlSource.includes('id="btnResumeBatch"'));
   assert.ok(htmlSource.includes('id="btnDiscardBatch"'));
+});
+
+test("large batches skip failed items, retry them at the end, and reuse a persistent bounded theme grid", () => {
+  const mainSource = fs.readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
+  const rendererSource = fs.readFileSync(new URL("../src/main.js", import.meta.url), "utf8");
+  const directorSource = fs.readFileSync(
+    new URL("../minecraft-mod/src/client/java/com/parkoursim/director/client/ParkourDirectorClient.java", import.meta.url),
+    "utf8",
+  );
+  assert.ok(rendererSource.includes("recordMinecraftItemWithRetries"));
+  assert.ok(rendererSource.includes("failedItems"));
+  assert.ok(rendererSource.includes("已记入补跑队列，继续下一条"));
+  assert.ok(rendererSource.includes("主队列已完成，将补跑"));
+  assert.ok(rendererSource.includes("batchCount + 1"));
+  assert.ok(rendererSource.includes("fatalBatchError"));
+  assert.ok(mainSource.includes("parkoursim-heartbeat.txt"));
+  assert.ok(mainSource.includes("heartbeatElapsedSeconds"));
+  assert.ok(mainSource.includes("batchIndex=${batchIndex}"));
+  assert.ok(mainSource.includes("optimizeMinecraftVideoSettings();"));
+  assert.ok(directorSource.includes("THEME_GRID_COLUMNS = 6"));
+  assert.ok(directorSource.includes("THEME_COLUMN_SPACING = 64"));
+  assert.ok(directorSource.includes("THEME_ROW_SPACING = 5120"));
+  assert.ok(directorSource.includes("ANCHOR_LAYOUT_VERSION = \"grid60-v3\""));
+  assert.ok(directorSource.includes("batchAnchor"));
+  assert.ok(directorSource.includes("parkoursim-anchor.properties"));
+  assert.ok(directorSource.includes("worldAnchorPrefix()"));
+  assert.ok(directorSource.includes("per-world fixed 60-theme region grid"));
+  assert.ok(directorSource.includes('.filter(key -> key.startsWith(regionPrefix))'));
+  assert.ok(directorSource.includes('properties.remove(staleRegionKey)'));
+  assert.ok(directorSource.includes("regionY."));
+  assert.ok(directorSource.includes("client.options.renderDistance().set(MANAGED_RENDER_DISTANCE)"));
+  assert.ok(directorSource.includes("client.options.simulationDistance().set(MANAGED_SIMULATION_DISTANCE)"));
+  assert.ok(directorSource.includes("parkoursim-heartbeat.txt"));
+});
+
+test("large overnight batches enforce disk safety and recycle capture resources every 50 clips", () => {
+  const mainSource = fs.readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
+  const preloadSource = fs.readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8");
+  const rendererSource = fs.readFileSync(new URL("../src/main.js", import.meta.url), "utf8");
+  assert.ok(mainSource.includes("MIN_FREE_STORAGE_BYTES = 20 * 1024 * 1024 * 1024"));
+  assert.ok(mainSource.includes("fs.statfsSync(directory)"));
+  assert.ok(mainSource.includes('ipcMain.handle("get-recording-storage-status"'));
+  assert.ok(preloadSource.includes("getRecordingStorageStatus"));
+  assert.ok(rendererSource.includes("BATCH_MAINTENANCE_INTERVAL = 50"));
+  assert.ok(rendererSource.includes("performBatchMaintenance(index, batchCount)"));
+  assert.ok(rendererSource.includes("minecraftRecorder.close(false)"));
+  assert.ok(rendererSource.includes("低于 20 GB 安全线；任务已暂停并保留断点"));
+});
+
+test("generation history avoids 30-day combinations and reviews five-frame visual similarity", () => {
+  const mainSource = fs.readFileSync(new URL("../electron/main.cjs", import.meta.url), "utf8");
+  const preloadSource = fs.readFileSync(new URL("../electron/preload.cjs", import.meta.url), "utf8");
+  const rendererSource = fs.readFileSync(new URL("../src/main.js", import.meta.url), "utf8");
+  const directorSource = fs.readFileSync(
+    new URL("../minecraft-mod/src/client/java/com/parkoursim/director/client/ParkourDirectorClient.java", import.meta.url),
+    "utf8",
+  );
+  const builderSource = fs.readFileSync(
+    new URL("../minecraft-mod/src/main/java/com/parkoursim/director/CourseBuilder.java", import.meta.url),
+    "utf8",
+  );
+  assert.ok(mainSource.includes("GENERATION_HISTORY_DAYS = 30"));
+  assert.ok(mainSource.includes('"generation-history.json"'));
+  assert.ok(mainSource.includes('ipcMain.handle("complete-parkour-job"'));
+  assert.ok(mainSource.includes('"-frames:v", "5"'));
+  assert.ok(mainSource.includes('"_similar-review"'));
+  assert.ok(preloadSource.includes("completeParkourJob"));
+  assert.ok(rendererSource.includes("正在抽取 5 帧检查近 30 天画面重复度"));
+  for (const field of ["paletteVariant", "landmarkPack", "terrainProfile", "sceneOrderProfile", "cameraProfile"]) {
+    assert.ok(mainSource.includes(field), `desktop should persist ${field}`);
+    assert.ok(directorSource.includes(field), `director should expose ${field}`);
+  }
+  assert.ok(builderSource.includes("clearKnownDecorations(stage)"));
 });
 
 test("director no longer forces the Minecraft window to maximize", () => {

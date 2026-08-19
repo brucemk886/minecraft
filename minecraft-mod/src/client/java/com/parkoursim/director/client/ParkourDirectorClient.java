@@ -44,11 +44,27 @@ public final class ParkourDirectorClient implements ClientModInitializer {
     private static final int STREAM_AHEAD_STAGES = 3;
     private static final double ESTIMATED_SECONDS_PER_STAGE = 10.2;
     private static final long FIXED_DAY_TIME = 6000L;
-    private static final int TEMPLATE_VARIANTS_PER_THEME = 10;
-    private static final int TEMPLATE_COUNT = 100;
+    private static final int TEMPLATE_VARIANTS_PER_THEME = 5;
+    private static final int TEMPLATE_COUNT = 300;
+    private static final int THEME_GRID_COLUMNS = 6;
+    private static final int THEME_COLUMN_SPACING = 64;
+    private static final int THEME_ROW_SPACING = 5120;
+    private static final String ANCHOR_LAYOUT_VERSION = "grid60-v3";
+    private static final int MANAGED_RENDER_DISTANCE = 12;
+    private static final int MANAGED_SIMULATION_DISTANCE = 8;
     private static final List<String> THEMES = List.of(
         "village", "library", "lava", "lush", "checker",
-        "honey", "cherry", "ice", "nether", "crystal"
+        "honey", "cherry", "ice", "nether", "crystal",
+        "desert", "bamboo", "ocean", "mushroom", "copper",
+        "redstone", "quartz", "castle", "melon", "coral",
+        "rainbow", "swamp", "birch", "azalea", "obsidian",
+        "gold", "emerald", "factory", "arcade", "savanna",
+        "alpine", "jungle", "coast", "oasis", "candy",
+        "clockwork", "marble", "vineyard", "pumpkin", "aquarium",
+        "railway", "harbor", "cathedral", "dojo", "oriental",
+        "mesa", "quarry", "greenhouse", "carnival", "laboratory",
+        "music", "bakery", "volcano", "lagoon", "autumn",
+        "winter", "dragon", "maze", "observatory", "stadium"
     );
 
     private Minecraft client;
@@ -73,7 +89,10 @@ public final class ParkourDirectorClient implements ClientModInitializer {
     private boolean cameraPoseInitialized;
     private String selectedTheme = "village-v01";
     private BlockPos courseOrigin;
+    private BlockPos batchAnchor;
+    private String activeWorldKey = "";
     private long routeSeed;
+    private int cameraProfile;
     private int targetStages;
     private int nextStage;
     private int builtStages;
@@ -163,7 +182,7 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         }
         String theme = resolveTheme(readSelectedTheme(), System.nanoTime());
         int durationSeconds = readSelectedDuration();
-        startJob("manual-" + System.currentTimeMillis(), theme, System.nanoTime(), durationSeconds);
+        startJob("manual-" + System.currentTimeMillis(), theme, System.nanoTime(), durationSeconds, 1);
     }
 
     private void lockBrightDay() {
@@ -176,7 +195,7 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         }));
     }
 
-    private boolean startJob(String jobId, String requestedTheme, long seed, int durationSeconds) {
+    private boolean startJob(String jobId, String requestedTheme, long seed, int durationSeconds, int batchIndex) {
         MinecraftServer server = client == null ? null : client.getSingleplayerServer();
         LocalPlayer player = client == null ? null : client.player;
         if (server == null || player == null) return false;
@@ -185,6 +204,7 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         activeJobId = jobId;
         selectedTheme = resolveTheme(requestedTheme, seed);
         routeSeed = seed;
+        cameraProfile = variationIndex(seed, 0xA24BAED4963EE407L, 4);
         targetDurationSeconds = Math.max(120, Math.min(900, durationSeconds));
         targetStages = Math.max(
             PREBUILD_STAGES,
@@ -198,19 +218,97 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         warmupTicks = 0;
         autoStarted = true;
         cameraPoseInitialized = false;
+        if (client.options != null) {
+            client.options.renderDistance().set(MANAGED_RENDER_DISTANCE);
+            client.options.simulationDistance().set(MANAGED_SIMULATION_DISTANCE);
+        }
 
         ServerLevel level = server.overworld();
-        int startX = player.getBlockX() + 192;
-        int startZ = player.getBlockZ();
-        int terrainY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, startX, startZ);
-        int startY = Math.max(-40, Math.min(220, terrainY + 8));
+        String worldKey = worldKey(server);
+        if (!worldKey.equals(activeWorldKey)) {
+            activeWorldKey = worldKey;
+            batchAnchor = null;
+        }
+        if (batchAnchor == null) batchAnchor = loadOrCreateBatchAnchor(level, player);
+        String baseTheme = CourseBuilder.baseTheme(selectedTheme);
+        int themeRegion = Math.max(0, THEMES.indexOf(baseTheme));
+        int regionColumn = themeRegion % THEME_GRID_COLUMNS;
+        int regionRow = themeRegion / THEME_GRID_COLUMNS;
+        int startX = batchAnchor.getX() + regionColumn * THEME_COLUMN_SPACING;
+        int startZ = batchAnchor.getZ() + regionRow * THEME_ROW_SPACING;
+        int startY = resolveRegionY(level, baseTheme, startX, startZ);
         courseOrigin = new BlockPos(startX, startY, startZ);
 
         planNextStage();
         writeStatus("building", "正在预生成开头场景，录制将在路线就绪后自动开始");
         message("正在生成新路线：" + CourseBuilder.themeName(selectedTheme)
-            + "，种子 " + routeSeed + "，约 " + targetDurationSeconds / 60 + " 分钟");
+            + "，固定主题区域 " + (themeRegion + 1) + "/" + THEMES.size()
+            + "（网格 " + (regionColumn + 1) + "," + (regionRow + 1) + "）"
+            + "，批次 " + batchIndex + "，种子 " + routeSeed + "，约 " + targetDurationSeconds / 60 + " 分钟");
         return true;
+    }
+
+    private BlockPos loadOrCreateBatchAnchor(ServerLevel level, LocalPlayer player) {
+        Properties properties = readProperties(anchorPath());
+        String prefix = worldAnchorPrefix();
+        int storedX = (int) parseLong(properties.getProperty(prefix + "anchorX", ""), Integer.MIN_VALUE);
+        int storedZ = (int) parseLong(properties.getProperty(prefix + "anchorZ", ""), Integer.MIN_VALUE);
+        if (storedX != Integer.MIN_VALUE && storedZ != Integer.MIN_VALUE) {
+            if (!ANCHOR_LAYOUT_VERSION.equals(properties.getProperty(prefix + "layoutVersion", ""))) {
+                String regionPrefix = prefix + "regionY.";
+                List<String> staleRegionKeys = properties.stringPropertyNames().stream()
+                    .filter(key -> key.startsWith(regionPrefix))
+                    .toList();
+                for (String staleRegionKey : staleRegionKeys) {
+                    properties.remove(staleRegionKey);
+                }
+                properties.setProperty("layoutVersion", ANCHOR_LAYOUT_VERSION);
+                properties.setProperty(prefix + "layoutVersion", ANCHOR_LAYOUT_VERSION);
+                storeProperties(anchorPath(), properties, "ParkourSim per-world fixed 60-theme region grid");
+            }
+            return new BlockPos(storedX, player.getBlockY(), storedZ);
+        }
+
+        boolean hasWorldAnchors = properties.stringPropertyNames().stream().anyMatch(key -> key.startsWith("world."));
+        int legacyX = hasWorldAnchors ? Integer.MIN_VALUE
+            : (int) parseLong(properties.getProperty("anchorX", ""), Integer.MIN_VALUE);
+        int legacyZ = hasWorldAnchors ? Integer.MIN_VALUE
+            : (int) parseLong(properties.getProperty("anchorZ", ""), Integer.MIN_VALUE);
+        int x = legacyX != Integer.MIN_VALUE ? legacyX : player.getBlockX() + 192;
+        int z = legacyZ != Integer.MIN_VALUE ? legacyZ : player.getBlockZ();
+        properties.setProperty("layoutVersion", ANCHOR_LAYOUT_VERSION);
+        properties.setProperty(prefix + "layoutVersion", ANCHOR_LAYOUT_VERSION);
+        properties.setProperty(prefix + "anchorX", Integer.toString(x));
+        properties.setProperty(prefix + "anchorZ", Integer.toString(z));
+        storeProperties(anchorPath(), properties, "ParkourSim per-world fixed 60-theme region grid");
+        return new BlockPos(x, level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z), z);
+    }
+
+    private int resolveRegionY(ServerLevel level, String baseTheme, int x, int z) {
+        Properties properties = readProperties(anchorPath());
+        String prefix = worldAnchorPrefix();
+        String key = prefix + "regionY." + baseTheme;
+        int stored = (int) parseLong(properties.getProperty(key, ""), Integer.MIN_VALUE);
+        if (stored >= -40 && stored <= 220) return stored;
+
+        int terrainY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, x, z);
+        int startY = Math.max(-40, Math.min(220, terrainY + 8));
+        properties.setProperty("layoutVersion", ANCHOR_LAYOUT_VERSION);
+        properties.setProperty(prefix + "layoutVersion", ANCHOR_LAYOUT_VERSION);
+        properties.setProperty(prefix + "anchorX", Integer.toString(batchAnchor.getX()));
+        properties.setProperty(prefix + "anchorZ", Integer.toString(batchAnchor.getZ()));
+        properties.setProperty(key, Integer.toString(startY));
+        storeProperties(anchorPath(), properties, "ParkourSim per-world fixed 60-theme region grid");
+        return startY;
+    }
+
+    private String worldAnchorPrefix() {
+        return "world." + (activeWorldKey.isEmpty() ? "default" : activeWorldKey) + ".";
+    }
+
+    private static String worldKey(MinecraftServer server) {
+        String levelName = server.getWorldData().getLevelName();
+        return Integer.toUnsignedString(levelName.hashCode(), 36);
     }
 
     private void processExternalJob() {
@@ -230,7 +328,8 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         String requestedTheme = job.getProperty("theme", "random").trim().toLowerCase();
         long seed = parseLong(job.getProperty("seed", ""), System.nanoTime());
         int duration = (int) parseLong(job.getProperty("durationSeconds", "150"), 150);
-        if (startJob(jobId, requestedTheme, seed, duration)) lastJobId = jobId;
+        int batchIndex = (int) parseLong(job.getProperty("batchIndex", "1"), 1);
+        if (startJob(jobId, requestedTheme, seed, duration, batchIndex)) lastJobId = jobId;
     }
 
     private static String resolveTheme(String requestedTheme, long seed) {
@@ -270,6 +369,11 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         status.setProperty("theme", selectedTheme);
         status.setProperty("themeName", CourseBuilder.themeName(selectedTheme));
         status.setProperty("seed", Long.toString(routeSeed));
+        status.setProperty("paletteVariant", Integer.toString(variationIndex(routeSeed, 0x632BE59BD9B4E019L, 4)));
+        status.setProperty("landmarkPack", Integer.toString(variationIndex(routeSeed, 0x8CB92BA72F3D8DD7L, 6)));
+        status.setProperty("terrainProfile", Integer.toString(variationIndex(routeSeed, 0x9E3779B97F4A7C15L, 4)));
+        status.setProperty("sceneOrderProfile", Integer.toString(variationIndex(routeSeed, 0xD1B54A32D192ED03L, 8)));
+        status.setProperty("cameraProfile", Integer.toString(cameraProfile));
         status.setProperty("durationSeconds", Integer.toString(targetDurationSeconds));
         status.setProperty("builtStages", Integer.toString(builtStages));
         status.setProperty("targetStages", Integer.toString(targetStages));
@@ -277,6 +381,17 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         status.setProperty("detail", detail);
         Path path = statusPath();
         Path temp = path.resolveSibling(path.getFileName() + ".tmp");
+        try {
+            Files.createDirectories(path.getParent());
+            Files.writeString(
+                heartbeatPath(),
+                activeJobId + System.lineSeparator()
+                    + elapsedRunTicks / 20 + System.lineSeparator()
+                    + state + System.lineSeparator()
+            );
+        } catch (Exception ignored) {
+            // The regular status file below remains a fallback heartbeat.
+        }
         try {
             Files.createDirectories(path.getParent());
             try (OutputStream output = Files.newOutputStream(temp)) {
@@ -306,6 +421,23 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         return properties;
     }
 
+    private static void storeProperties(Path path, Properties properties, String comment) {
+        Path temp = path.resolveSibling(path.getFileName() + ".tmp");
+        try {
+            Files.createDirectories(path.getParent());
+            try (OutputStream output = Files.newOutputStream(temp)) {
+                properties.store(output, comment);
+            }
+            try {
+                Files.move(temp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (Exception ignored) {
+                Files.move(temp, path, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (Exception ignored) {
+            // A failed anchor write only falls back to this session's in-memory anchor.
+        }
+    }
+
     private static long parseLong(String value, long fallback) {
         try {
             return Long.parseLong(value.trim());
@@ -321,12 +453,24 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         return mixed ^ (mixed >>> 31);
     }
 
+    private static int variationIndex(long seed, long salt, int bound) {
+        return (int) Math.floorMod(mix64(seed ^ salt), bound);
+    }
+
     private static Path jobConfigPath() {
         return FabricLoader.getInstance().getConfigDir().resolve("parkoursim-job.properties");
     }
 
     private static Path statusPath() {
         return FabricLoader.getInstance().getConfigDir().resolve("parkoursim-status.properties");
+    }
+
+    private static Path heartbeatPath() {
+        return FabricLoader.getInstance().getConfigDir().resolve("parkoursim-heartbeat.txt");
+    }
+
+    private static Path anchorPath() {
+        return FabricLoader.getInstance().getConfigDir().resolve("parkoursim-anchor.properties");
     }
 
     private void buildNextBatch() {
@@ -383,13 +527,23 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         if (client.options != null) {
             client.options.pauseOnLostFocus = false;
             previousFov = client.options.fov().get();
-            client.options.fov().set(92);
+            client.options.fov().set(switch (cameraProfile) {
+                case 0 -> 88;
+                case 1 -> 92;
+                case 2 -> 96;
+                default -> 90;
+            });
         }
         changedHud = !client.gui.hud.isHidden();
         if (changedHud) client.gui.hud.toggle();
         setSpectator(true);
-        cameraYaw = lookYaw(routePoints.get(0), lookAhead(routePoints, 0, WALK_LOOK_AHEAD));
-        cameraPitch = 16;
+        cameraYaw = lookYaw(routePoints.get(0), lookAhead(routePoints, 0, cameraLookAhead(WALK_LOOK_AHEAD)));
+        cameraPitch = switch (cameraProfile) {
+            case 0 -> 13;
+            case 2 -> 18;
+            case 3 -> 11;
+            default -> 16;
+        };
         cameraPoseInitialized = true;
         teleportTo(routePoints.get(0), cameraYaw, cameraPitch);
         writeStatus("running", "路线已就绪，开始单向自动跑酷");
@@ -424,7 +578,7 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         Vec3 lookTarget = lookAhead(
             routePoints,
             nextIndex,
-            needsJump ? JUMP_LOOK_AHEAD : WALK_LOOK_AHEAD
+            cameraLookAhead(needsJump ? JUMP_LOOK_AHEAD : WALK_LOOK_AHEAD)
         );
         float targetYaw = lookYaw(position, lookTarget);
         double lookDistance = Math.max(2.5, Math.hypot(lookTarget.x - position.x, lookTarget.z - position.z));
@@ -437,8 +591,20 @@ public final class ParkourDirectorClient implements ClientModInitializer {
             cameraPitch = targetPitch;
             cameraPoseInitialized = true;
         } else {
-            cameraYaw = lerpAngle(cameraYaw, targetYaw, 0.22f);
-            cameraPitch += (targetPitch - cameraPitch) * 0.17f;
+            float yawSmoothing = switch (cameraProfile) {
+                case 0 -> 0.18f;
+                case 2 -> 0.27f;
+                case 3 -> 0.20f;
+                default -> 0.22f;
+            };
+            float pitchSmoothing = switch (cameraProfile) {
+                case 0 -> 0.13f;
+                case 2 -> 0.21f;
+                case 3 -> 0.15f;
+                default -> 0.17f;
+            };
+            cameraYaw = lerpAngle(cameraYaw, targetYaw, yawSmoothing);
+            cameraPitch += (targetPitch - cameraPitch) * pitchSmoothing;
         }
         teleportTo(position, cameraYaw, cameraPitch);
         elapsedRunTicks++;
@@ -469,6 +635,15 @@ public final class ParkourDirectorClient implements ClientModInitializer {
             case "library", "honey", "ice" -> 0.94;
             default -> 0.97;
         };
+    }
+
+    private int cameraLookAhead(int baseDistance) {
+        return Math.max(3, switch (cameraProfile) {
+            case 0 -> baseDistance + 2;
+            case 2 -> baseDistance - 1;
+            case 3 -> baseDistance + 1;
+            default -> baseDistance;
+        });
     }
 
     private void teleportTo(Vec3 position, float yaw, float pitch) {
@@ -549,6 +724,8 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         plannedStage = -1;
         elapsedRunTicks = 0;
         courseOrigin = null;
+        batchAnchor = null;
+        activeWorldKey = "";
     }
 
     private String readSelectedTheme() {

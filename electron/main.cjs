@@ -6,12 +6,28 @@ const { execFile, spawn } = require("child_process");
 
 const MINECRAFT_VERSION = "26.2";
 const FABRIC_LOADER_VERSION = "0.19.3";
-const REAL_BASE_THEMES = new Set([
+const REAL_THEME_ORDER = [
   "village", "library", "lava", "lush", "checker", "honey",
   "cherry", "ice", "nether", "crystal",
-]);
-const TEMPLATE_ID_PATTERN = /^(village|library|lava|lush|checker|honey|cherry|ice|nether|crystal)-v(0[1-9]|10)$/;
+  "desert", "bamboo", "ocean", "mushroom", "copper", "redstone",
+  "quartz", "castle", "melon", "coral", "rainbow", "swamp",
+  "birch", "azalea", "obsidian", "gold", "emerald", "factory",
+  "arcade", "savanna",
+  "alpine", "jungle", "coast", "oasis", "candy", "clockwork",
+  "marble", "vineyard", "pumpkin", "aquarium", "railway", "harbor",
+  "cathedral", "dojo", "oriental", "mesa", "quarry", "greenhouse",
+  "carnival", "laboratory", "music", "bakery", "volcano", "lagoon",
+  "autumn", "winter", "dragon", "maze", "observatory", "stadium",
+];
+const REAL_BASE_THEMES = new Set(REAL_THEME_ORDER);
+const TEMPLATE_ID_PATTERN = /^([a-z][a-z0-9-]*)-v(0[1-5])$/;
 const recordingSessions = new Map();
+const pendingParkourJobs = new Map();
+const GENERATION_HISTORY_DAYS = 30;
+const GENERATION_HISTORY_LIMIT = 6000;
+const SIMILARITY_REVIEW_THRESHOLD = 0.945;
+const MIN_FREE_STORAGE_BYTES = 20 * 1024 * 1024 * 1024;
+const MIX64_MASK = (1n << 64n) - 1n;
 let keepAwakeBlockerId = null;
 
 app.commandLine.appendSwitch("ignore-gpu-blocklist");
@@ -61,6 +77,32 @@ function setClipsDir(requestedDirectory) {
   return directory;
 }
 
+function recordingStorageStatus() {
+  const directory = clipsDir();
+  try {
+    const stats = fs.statfsSync(directory);
+    const freeBytes = Number(stats.bavail) * Number(stats.bsize);
+    return {
+      directory,
+      supported: true,
+      freeBytes,
+      freeGigabytes: freeBytes / (1024 ** 3),
+      minimumFreeBytes: MIN_FREE_STORAGE_BYTES,
+      safe: freeBytes >= MIN_FREE_STORAGE_BYTES,
+    };
+  } catch (error) {
+    return {
+      directory,
+      supported: false,
+      freeBytes: null,
+      freeGigabytes: null,
+      minimumFreeBytes: MIN_FREE_STORAGE_BYTES,
+      safe: true,
+      detail: error.message || String(error),
+    };
+  }
+}
+
 function minecraftDir() {
   return path.join(app.getPath("appData"), ".minecraft");
 }
@@ -83,6 +125,179 @@ function parkourJobPath() {
 
 function parkourStatusPath() {
   return path.join(minecraftDir(), "config", "parkoursim-status.properties");
+}
+
+function parkourHeartbeatPath() {
+  return path.join(minecraftDir(), "config", "parkoursim-heartbeat.txt");
+}
+
+function generationHistoryPath() {
+  return path.join(app.getPath("userData"), "generation-history.json");
+}
+
+function readGenerationHistory() {
+  let records = [];
+  try {
+    const parsed = JSON.parse(fs.readFileSync(generationHistoryPath(), "utf8"));
+    records = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.records) ? parsed.records : [];
+  } catch {}
+  const cutoff = Date.now() - GENERATION_HISTORY_DAYS * 24 * 60 * 60 * 1000;
+  return records
+    .filter((record) => record && Number(record.createdAt || 0) >= cutoff)
+    .slice(-GENERATION_HISTORY_LIMIT);
+}
+
+function writeGenerationHistory(records) {
+  writeAtomic(generationHistoryPath(), `${JSON.stringify({ version: 1, records: records.slice(-GENERATION_HISTORY_LIMIT) }, null, 2)}\n`);
+}
+
+function unsigned64(value) {
+  return BigInt.asUintN(64, value) & MIX64_MASK;
+}
+
+function mix64BigInt(value) {
+  let mixed = unsigned64(value);
+  mixed = unsigned64((mixed ^ (mixed >> 30n)) * 0xbf58476d1ce4e5b9n);
+  mixed = unsigned64((mixed ^ (mixed >> 27n)) * 0x94d049bb133111ebn);
+  return BigInt.asIntN(64, mixed ^ (mixed >> 31n));
+}
+
+function floorModBigInt(value, bound) {
+  const divisor = BigInt(bound);
+  return Number(((value % divisor) + divisor) % divisor);
+}
+
+function variationIndex(seed, salt, bound) {
+  return floorModBigInt(mix64BigInt(unsigned64(BigInt(seed)) ^ salt), bound);
+}
+
+function resolvedThemeForSeed(requestedTheme, seed) {
+  const templateMatch = TEMPLATE_ID_PATTERN.exec(requestedTheme);
+  if (templateMatch && REAL_BASE_THEMES.has(templateMatch[1])) return requestedTheme;
+  const mixed = mix64BigInt(BigInt(seed));
+  if (REAL_BASE_THEMES.has(requestedTheme)) {
+    return `${requestedTheme}-v${String(floorModBigInt(mixed, 5) + 1).padStart(2, "0")}`;
+  }
+  const templateIndex = floorModBigInt(mixed, REAL_THEME_ORDER.length * 5);
+  return `${REAL_THEME_ORDER[Math.floor(templateIndex / 5)]}-v${String(templateIndex % 5 + 1).padStart(2, "0")}`;
+}
+
+function variationForSeed(requestedTheme, seed) {
+  const theme = resolvedThemeForSeed(requestedTheme, seed);
+  const variation = {
+    theme,
+    baseTheme: TEMPLATE_ID_PATTERN.exec(theme)?.[1] || theme,
+    paletteVariant: variationIndex(seed, 0x632be59bd9b4e019n, 4),
+    landmarkPack: variationIndex(seed, 0x8cb92ba72f3d8dd7n, 6),
+    terrainProfile: variationIndex(seed, 0x9e3779b97f4a7c15n, 4),
+    sceneOrderProfile: variationIndex(seed, 0xd1b54a32d192ed03n, 8),
+    cameraProfile: variationIndex(seed, 0xa24baed4963ee407n, 4),
+  };
+  variation.signature = [
+    variation.theme,
+    variation.paletteVariant,
+    variation.landmarkPack,
+    variation.terrainProfile,
+    variation.sceneOrderProfile,
+    variation.cameraProfile,
+  ].join(":");
+  return variation;
+}
+
+function chooseUnusedRouteSeed(requestedTheme) {
+  const pendingCutoff = Date.now() - 60 * 60 * 1000;
+  for (const [jobId, pending] of pendingParkourJobs) {
+    if (Number(pending.startedAt || 0) < pendingCutoff) pendingParkourJobs.delete(jobId);
+  }
+  const used = new Set(readGenerationHistory().map((record) => record.signature).filter(Boolean));
+  for (const pending of pendingParkourJobs.values()) {
+    if (pending.signature) used.add(pending.signature);
+  }
+  let fallbackSeed = newRouteSeed();
+  let fallbackVariation = variationForSeed(requestedTheme, fallbackSeed);
+  for (let attempt = 0; attempt < 256; attempt++) {
+    const seed = attempt === 0 ? fallbackSeed : newRouteSeed();
+    const variation = variationForSeed(requestedTheme, seed);
+    fallbackSeed = seed;
+    fallbackVariation = variation;
+    if (!used.has(variation.signature)) return { seed, variation };
+  }
+  return { seed: fallbackSeed, variation: fallbackVariation };
+}
+
+function averageHashFrame(frame) {
+  if (!frame.length) return "";
+  const average = frame.reduce((sum, value) => sum + value, 0) / frame.length;
+  let hash = "";
+  for (let index = 0; index < frame.length; index += 4) {
+    let nibble = 0;
+    for (let bit = 0; bit < 4; bit++) {
+      if (frame[index + bit] >= average) nibble |= 1 << (3 - bit);
+    }
+    hash += nibble.toString(16);
+  }
+  return hash;
+}
+
+function fingerprintVideo(filePath, durationSeconds) {
+  return new Promise((resolve, reject) => {
+    const interval = Math.max(1, Math.floor((Math.max(30, Number(durationSeconds) || 120) - 8) / 4));
+    const child = spawn("ffmpeg", [
+      "-v", "error", "-i", filePath,
+      "-vf", `fps=1/${interval},scale=16:16:flags=area,format=gray`,
+      "-frames:v", "5", "-f", "rawvideo", "pipe:1",
+    ], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    const chunks = [];
+    let errorText = "";
+    const timeout = setTimeout(() => child.kill(), 60_000);
+    child.stdout.on("data", (chunk) => chunks.push(chunk));
+    child.stderr.on("data", (chunk) => { errorText += chunk.toString(); });
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(new Error(errorText.trim() || "视频相似度分析失败"));
+        return;
+      }
+      const raw = Buffer.concat(chunks);
+      const hashes = [];
+      for (let offset = 0; offset + 256 <= raw.length && hashes.length < 5; offset += 256) {
+        hashes.push(averageHashFrame(raw.subarray(offset, offset + 256)));
+      }
+      if (hashes.length < 3) reject(new Error("视频有效抽帧不足 3 帧"));
+      else resolve(hashes);
+    });
+  });
+}
+
+const NIBBLE_POPCOUNT = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4];
+
+function fingerprintSimilarity(first, second) {
+  const frameCount = Math.min(first?.length || 0, second?.length || 0);
+  if (frameCount < 3) return 0;
+  let differentBits = 0;
+  let totalBits = 0;
+  for (let frame = 0; frame < frameCount; frame++) {
+    const length = Math.min(first[frame].length, second[frame].length);
+    for (let index = 0; index < length; index++) {
+      differentBits += NIBBLE_POPCOUNT[Number.parseInt(first[frame][index], 16) ^ Number.parseInt(second[frame][index], 16)];
+      totalBits += 4;
+    }
+  }
+  return totalBits ? 1 - differentBits / totalBits : 0;
+}
+
+function moveToSimilarityReview(filePath) {
+  const reviewDirectory = path.join(path.dirname(filePath), "_similar-review");
+  fs.mkdirSync(reviewDirectory, { recursive: true });
+  const parsed = path.parse(filePath);
+  let destination = path.join(reviewDirectory, parsed.base);
+  if (fs.existsSync(destination)) destination = path.join(reviewDirectory, `${parsed.name}-${crypto.randomUUID().slice(0, 8)}${parsed.ext}`);
+  fs.renameSync(filePath, destination);
+  return destination;
 }
 
 function writeAtomic(filePath, content) {
@@ -121,7 +336,8 @@ function newRouteSeed() {
 }
 
 function isRealTheme(value) {
-  return value === "random" || REAL_BASE_THEMES.has(value) || TEMPLATE_ID_PATTERN.test(value);
+  const match = TEMPLATE_ID_PATTERN.exec(value);
+  return value === "random" || REAL_BASE_THEMES.has(value) || Boolean(match && REAL_BASE_THEMES.has(match[1]));
 }
 
 function selectedTheme() {
@@ -205,6 +421,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  optimizeMinecraftVideoSettings();
   createWindow();
   globalShortcut.register("F7", () => {
     BrowserWindow.getAllWindows()[0]?.webContents.executeJavaScript("window.startGame?.(true)");
@@ -231,6 +448,10 @@ ipcMain.handle("save-clip", async (_event, buffer, suggestedName) => {
 });
 
 ipcMain.handle("start-recording-file", async (_event, suggestedName) => {
+  const storage = recordingStorageStatus();
+  if (storage.supported && !storage.safe) {
+    throw new Error(`视频盘仅剩 ${storage.freeGigabytes.toFixed(1)} GB，低于 20 GB 安全线，已停止创建新视频`);
+  }
   const requested = path.basename(String(suggestedName || "minecraft-parkour.webm"));
   const safeName = requested.replace(/[<>:"/\\|?*\x00-\x1f]/g, "-").replace(/\.webm$/i, "") + ".webm";
   let filePath = path.join(clipsDir(), safeName);
@@ -281,6 +502,8 @@ ipcMain.handle("open-clips", async () => {
 
 ipcMain.handle("get-clips-directory", async () => clipsDir());
 
+ipcMain.handle("get-recording-storage-status", async () => recordingStorageStatus());
+
 ipcMain.handle("choose-clips-directory", async () => {
   const options = {
     title: "选择视频保存目录",
@@ -320,15 +543,29 @@ app.on("will-quit", () => {
   recordingSessions.clear();
 });
 
-ipcMain.handle("minecraft-status", async () => realStatus());
+ipcMain.handle("minecraft-status", async () => ({
+  ...realStatus(),
+  running: await minecraftProcessesRunning(),
+}));
 
 ipcMain.handle("start-parkour-job", async (_event, request = {}) => {
   const requestedTheme = String(request.theme || "random").trim().toLowerCase();
   if (!isRealTheme(requestedTheme)) throw new Error("未知的 Minecraft 地图模板");
   const durationSeconds = Math.max(120, Math.min(900, Number.parseInt(request.durationSeconds, 10) || 150));
+  const batchIndex = Math.max(1, Math.min(999, Number.parseInt(request.batchIndex, 10) || 1));
   const requestedSeed = String(request.seed || "").trim();
-  const seed = /^-?\d+$/.test(requestedSeed) ? requestedSeed : newRouteSeed();
+  const selected = /^-?\d+$/.test(requestedSeed)
+    ? { seed: requestedSeed, variation: variationForSeed(requestedTheme, requestedSeed) }
+    : chooseUnusedRouteSeed(requestedTheme);
+  const { seed, variation } = selected;
   const jobId = crypto.randomUUID();
+  pendingParkourJobs.set(jobId, {
+    ...variation,
+    seed,
+    durationSeconds,
+    batchIndex,
+    startedAt: Date.now(),
+  });
   writeAtomic(themeConfigPath(), `${requestedTheme}\n`);
   writeAtomic(durationConfigPath(), `${durationSeconds}\n`);
   writeAtomic(parkourJobPath(), [
@@ -337,9 +574,76 @@ ipcMain.handle("start-parkour-job", async (_event, request = {}) => {
     `theme=${requestedTheme}`,
     `seed=${seed}`,
     `durationSeconds=${durationSeconds}`,
+    `batchIndex=${batchIndex}`,
+    `paletteVariant=${variation.paletteVariant}`,
+    `landmarkPack=${variation.landmarkPack}`,
+    `terrainProfile=${variation.terrainProfile}`,
+    `sceneOrderProfile=${variation.sceneOrderProfile}`,
+    `cameraProfile=${variation.cameraProfile}`,
     "",
   ].join("\n"));
-  return { jobId, theme: requestedTheme, seed, durationSeconds };
+  return { jobId, theme: requestedTheme, resolvedTheme: variation.theme, seed, durationSeconds, batchIndex, variation };
+});
+
+ipcMain.handle("complete-parkour-job", async (_event, request = {}) => {
+  const jobId = String(request.jobId || "").trim();
+  const pending = pendingParkourJobs.get(jobId);
+  if (!pending) throw new Error("找不到本条视频对应的生成任务");
+  const filePath = path.resolve(String(request.filePath || ""));
+  const outputRoot = path.resolve(clipsDir());
+  const relative = path.relative(outputRoot, filePath);
+  if (!filePath || relative.startsWith("..") || path.isAbsolute(relative) || !fs.existsSync(filePath)) {
+    pendingParkourJobs.delete(jobId);
+    throw new Error("生成的视频不在当前保存目录，无法执行去重检查");
+  }
+
+  const history = readGenerationHistory();
+  let fingerprint = null;
+  let analysisError = "";
+  try {
+    fingerprint = await fingerprintVideo(filePath, pending.durationSeconds);
+  } catch (error) {
+    analysisError = error.message || String(error);
+  }
+
+  let closest = null;
+  if (fingerprint) {
+    for (const record of history) {
+      if (record.baseTheme !== pending.baseTheme || !Array.isArray(record.fingerprint)) continue;
+      const similarity = fingerprintSimilarity(fingerprint, record.fingerprint);
+      if (!closest || similarity > closest.similarity) closest = { similarity, record };
+    }
+  }
+  const tooSimilar = Boolean(closest && closest.similarity >= SIMILARITY_REVIEW_THRESHOLD);
+  const finalPath = tooSimilar ? moveToSimilarityReview(filePath) : filePath;
+  const record = {
+    jobId,
+    createdAt: Date.now(),
+    seed: pending.seed,
+    signature: pending.signature,
+    theme: pending.theme,
+    baseTheme: pending.baseTheme,
+    paletteVariant: pending.paletteVariant,
+    landmarkPack: pending.landmarkPack,
+    terrainProfile: pending.terrainProfile,
+    sceneOrderProfile: pending.sceneOrderProfile,
+    cameraProfile: pending.cameraProfile,
+    fingerprint,
+    filePath: finalPath,
+    rejectedAsSimilar: tooSimilar,
+    similarity: closest?.similarity || 0,
+    analysisError,
+  };
+  history.push(record);
+  writeGenerationHistory(history);
+  pendingParkourJobs.delete(jobId);
+  return {
+    accepted: !tooSimilar,
+    filePath: finalPath,
+    similarity: closest?.similarity || 0,
+    comparedWith: closest?.record?.filePath || "",
+    analysisError,
+  };
 });
 
 ipcMain.handle("stop-parkour-job", async () => {
@@ -350,15 +654,27 @@ ipcMain.handle("stop-parkour-job", async () => {
 
 ipcMain.handle("get-parkour-status", async () => {
   const path = parkourStatusPath();
+  const heartbeatPath = parkourHeartbeatPath();
   const status = parseProperties(path);
+  let modifiedAt = 0;
   try {
-    const modifiedAt = fs.statSync(path).mtimeMs;
-    status.statusFileMtimeMs = modifiedAt;
-    status.statusFileAgeMs = Math.max(0, Date.now() - modifiedAt);
-  } catch {
-    status.statusFileMtimeMs = 0;
-    status.statusFileAgeMs = Number.POSITIVE_INFINITY;
-  }
+    modifiedAt = fs.statSync(path).mtimeMs;
+  } catch {}
+  try {
+    const heartbeatModifiedAt = fs.statSync(heartbeatPath).mtimeMs;
+    const [heartbeatJobId = "", heartbeatElapsedSeconds = "", heartbeatState = ""] = fs.readFileSync(heartbeatPath, "utf8").trim().split(/\r?\n/);
+    if (heartbeatJobId && (heartbeatJobId === status.jobId || heartbeatModifiedAt >= modifiedAt)) {
+      if (heartbeatModifiedAt >= modifiedAt) {
+        status.jobId = heartbeatJobId;
+        status.elapsedSeconds = heartbeatElapsedSeconds;
+        if (heartbeatState) status.state = heartbeatState;
+      }
+      status.heartbeatElapsedSeconds = heartbeatElapsedSeconds;
+      modifiedAt = Math.max(modifiedAt, heartbeatModifiedAt);
+    }
+  } catch {}
+  status.statusFileMtimeMs = modifiedAt;
+  status.statusFileAgeMs = modifiedAt > 0 ? Math.max(0, Date.now() - modifiedAt) : Number.POSITIVE_INFINITY;
   return status;
 });
 

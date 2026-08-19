@@ -11,6 +11,7 @@ import { RealMinecraftRecorder } from "./minecraft.js";
 import {
   MINECRAFT_BASE_THEMES,
   MINECRAFT_TEMPLATES,
+  minecraftDailyTemplateOffset,
   minecraftTemplateForBatchIndex,
 } from "./minecraft-templates.js";
 import { buildCourse, themeFog, themeSky } from "./themes.js";
@@ -99,13 +100,60 @@ const MINECRAFT_ITEM_ATTEMPTS = 3;
 const RECORDING_SCHEDULE_KEY = "parkoursim-recording-schedule-v1";
 const BATCH_CHECKPOINT_KEY = "parkoursim-batch-checkpoint-v1";
 const PARKOUR_HEALTH_POLL_MS = 2000;
-const PARKOUR_HEARTBEAT_TIMEOUT_MS = 15_000;
-const PARKOUR_VISUAL_FREEZE_TIMEOUT_MS = 15_000;
+const PARKOUR_HEARTBEAT_TIMEOUT_MS = 60_000;
+const PARKOUR_VISUAL_FREEZE_TIMEOUT_MS = 60_000;
+const BATCH_MAINTENANCE_INTERVAL = 50;
+const BATCH_MAINTENANCE_DELAY_MS = 8_000;
 const forward = new THREE.Vector3();
 const profileColor = new THREE.Color();
 
 function setStatus(text) {
   statusEl.textContent = text;
+}
+
+function fatalBatchError(message, openLauncher = true) {
+  const error = new Error(message);
+  error.fatalBatch = true;
+  error.openLauncher = openLauncher;
+  return error;
+}
+
+async function ensureRecordingStorage() {
+  const storage = await window.desktop.getRecordingStorageStatus?.().catch(() => null);
+  if (storage?.supported && storage.safe === false) {
+    throw fatalBatchError(
+      `视频盘仅剩 ${Number(storage.freeGigabytes).toFixed(1)} GB，低于 20 GB 安全线；任务已暂停并保留断点`,
+      false,
+    );
+  }
+  return storage;
+}
+
+async function performBatchMaintenance(completedIndex, batchCount) {
+  if (completedIndex >= batchCount || completedIndex % BATCH_MAINTENANCE_INTERVAL !== 0) return;
+  setStatus(`已完成 ${completedIndex}/${batchCount} 条：正在进行 8 秒资源维护，释放录屏源和旧任务…`);
+  await window.desktop.stopParkourJob().catch(() => {});
+  await minecraftRecorder.close(false).catch(() => {});
+  await delay(BATCH_MAINTENANCE_DELAY_MS);
+  const runtime = await window.desktop.getMinecraftStatus?.().catch(() => null);
+  if (runtime && runtime.running === false) {
+    throw fatalBatchError("资源维护时发现 Minecraft 已退出；断点已保留，并已尝试打开 Launcher");
+  }
+  await ensureRecordingStorage();
+}
+
+function failedBatchItem(index, theme, error) {
+  return {
+    index,
+    theme,
+    error: String(error?.message || error || "未知异常"),
+    failedAt: Date.now(),
+  };
+}
+
+function upsertFailedBatchItem(items, item) {
+  return [...items.filter((current) => current.index !== item.index), item]
+    .sort((left, right) => left.index - right.index);
 }
 
 function sizeRenderer() {
@@ -302,10 +350,11 @@ async function startMinecraft(shouldRecord) {
   const seconds = resume?.seconds || Number(document.querySelector("#realDuration").value);
   const requestedBatchCount = resume?.batchCount ?? Math.floor(Number(document.querySelector("#realBatchCount").value));
   const batchCount = Math.max(1, Math.min(999, Number.isFinite(requestedBatchCount) ? requestedBatchCount : 1));
-  const startIndex = Math.max(1, Math.min(batchCount, Number(resume?.nextIndex) || 1));
+  const startIndex = Math.max(1, Math.min(batchCount + 1, Number(resume?.nextIndex) || 1));
   const templateOffset = Number.isInteger(resume?.templateOffset)
     ? resume.templateOffset
-    : Math.floor(Math.random() * MINECRAFT_TEMPLATES.length);
+    : minecraftDailyTemplateOffset();
+  let failedItems = normalizeFailedBatchItems(resume?.failedItems, batchCount);
   document.querySelector("#realBatchCount").value = String(batchCount);
   saveBatchCheckpoint({
     theme,
@@ -313,6 +362,7 @@ async function startMinecraft(shouldRecord) {
     batchCount,
     nextIndex: startIndex,
     templateOffset,
+    failedItems,
     state: "running",
     lastError: "",
   });
@@ -325,41 +375,87 @@ async function startMinecraft(shouldRecord) {
         batchCount,
         nextIndex: index,
         templateOffset,
+        failedItems,
         state: "running",
         lastError: "",
       });
-      let itemCompleted = false;
-      for (let attempt = 1; attempt <= MINECRAFT_ITEM_ATTEMPTS; attempt++) {
-        if (minecraftAutomationCancelled) break;
-        try {
-          const itemTheme = theme === "random"
-            ? minecraftTemplateForBatchIndex(index, templateOffset).id
-            : theme;
-          itemCompleted = await recordMinecraftBatchItem({ index, batchCount, theme: itemTheme, seconds });
-          break;
-        } catch (error) {
-          await minecraftRecorder.close(false).catch(() => {});
-          if (minecraftAutomationCancelled) break;
-          if (attempt >= MINECRAFT_ITEM_ATTEMPTS) {
-            throw new Error(`第 ${index}/${batchCount} 条连续 ${MINECRAFT_ITEM_ATTEMPTS} 次失败：${error.message || error}`);
-          }
-          setStatus(`第 ${index}/${batchCount} 条录制中断，正在自动重试 ${attempt + 1}/${MINECRAFT_ITEM_ATTEMPTS}…`);
-          await delay(1500 * attempt);
-        }
+      const itemTheme = theme === "random"
+        ? minecraftTemplateForBatchIndex(index, templateOffset).id
+        : theme;
+      const result = await recordMinecraftItemWithRetries({
+        index,
+        batchCount,
+        theme: itemTheme,
+        seconds,
+        phase: "主队列",
+      });
+      if (minecraftAutomationCancelled) break;
+      if (!result.completed) {
+        failedItems = upsertFailedBatchItem(failedItems, failedBatchItem(index, itemTheme, result.error));
+        setStatus(`第 ${index}/${batchCount} 条已记入补跑队列，继续下一条…`);
+      } else {
+        failedItems = failedItems.filter((item) => item.index !== index);
       }
-      if (!itemCompleted || minecraftAutomationCancelled) break;
       saveBatchCheckpoint({
         theme,
         seconds,
         batchCount,
         nextIndex: index + 1,
         templateOffset,
+        failedItems,
         state: "running",
-        lastError: "",
+        lastError: result.completed ? "" : `第 ${index} 条等待批次末尾补跑`,
       });
+      await performBatchMaintenance(index, batchCount);
     }
     if (minecraftAutomationCancelled) {
       clearBatchCheckpoint(false);
+    } else if (failedItems.length > 0) {
+      const retryQueue = [...failedItems];
+      const stillFailed = [];
+      for (let position = 0; position < retryQueue.length; position++) {
+        const item = retryQueue[position];
+        saveBatchCheckpoint({
+          theme,
+          seconds,
+          batchCount,
+          nextIndex: batchCount + 1,
+          templateOffset,
+          failedItems: [...stillFailed, ...retryQueue.slice(position)],
+          state: "running",
+          lastError: `正在补跑第 ${item.index} 条`,
+        });
+        const result = await recordMinecraftItemWithRetries({
+          index: item.index,
+          batchCount,
+          theme: item.theme,
+          seconds,
+          phase: `补跑 ${position + 1}/${retryQueue.length}`,
+        });
+        if (minecraftAutomationCancelled) break;
+        if (!result.completed) {
+          stillFailed.push(failedBatchItem(item.index, item.theme, result.error));
+        }
+      }
+      failedItems = stillFailed;
+      if (minecraftAutomationCancelled) {
+        clearBatchCheckpoint(false);
+      } else if (failedItems.length > 0) {
+        saveBatchCheckpoint({
+          theme,
+          seconds,
+          batchCount,
+          nextIndex: batchCount + 1,
+          templateOffset,
+          failedItems,
+          state: "paused",
+          lastError: `主队列已完成，仍有 ${failedItems.length} 条补跑失败`,
+        });
+        setStatus(`主队列已完成；${failedItems.length} 条仍失败，断点已保留，可稍后继续补跑`);
+      } else {
+        clearBatchCheckpoint(false);
+        setStatus(`自动批量录制完成，共 ${batchCount} 条；失败条目已全部补跑成功`);
+      }
     } else {
       clearBatchCheckpoint(false);
       setStatus(`自动批量录制完成，共 ${batchCount} 条，已保存到指定目录`);
@@ -367,6 +463,9 @@ async function startMinecraft(shouldRecord) {
   } catch (error) {
     pauseBatchCheckpoint(error);
     await window.desktop.stopParkourJob().catch(() => {});
+    if (error?.fatalBatch && error.openLauncher !== false) {
+      await window.desktop.openMinecraftLauncher?.().catch(() => {});
+    }
     throw error;
   } finally {
     if (minecraftRecorder.recording) {
@@ -381,11 +480,34 @@ async function startMinecraft(shouldRecord) {
   }
 }
 
+async function recordMinecraftItemWithRetries({ index, batchCount, theme, seconds, phase }) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= MINECRAFT_ITEM_ATTEMPTS; attempt++) {
+    if (minecraftAutomationCancelled) return { completed: false, error: new Error("用户已停止任务") };
+    try {
+      const completed = await recordMinecraftBatchItem({ index, batchCount, theme, seconds });
+      if (completed) return { completed: true, error: null };
+      lastError = new Error("录制未达到预定时长");
+    } catch (error) {
+      lastError = error;
+      await minecraftRecorder.close(false).catch(() => {});
+      if (error?.fatalBatch) throw error;
+    }
+    if (minecraftAutomationCancelled) break;
+    if (attempt < MINECRAFT_ITEM_ATTEMPTS) {
+      setStatus(`${phase}第 ${index}/${batchCount} 条中断，正在自动重试 ${attempt + 1}/${MINECRAFT_ITEM_ATTEMPTS}…`);
+      await delay(1500 * attempt);
+    }
+  }
+  return { completed: false, error: lastError || new Error("未知录制错误") };
+}
+
 async function recordMinecraftBatchItem({ index, batchCount, theme, seconds }) {
   let jobStarted = false;
   try {
+    await ensureRecordingStorage();
     setStatus(`第 ${index}/${batchCount} 条：正在创建全新随机路线…`);
-    const job = await window.desktop.startParkourJob({ theme, durationSeconds: seconds });
+    const job = await window.desktop.startParkourJob({ theme, durationSeconds: seconds, batchIndex: index });
     jobStarted = true;
     const director = await waitForParkourReady(job.jobId, index, batchCount);
     if (minecraftAutomationCancelled) return false;
@@ -413,7 +535,17 @@ async function recordMinecraftBatchItem({ index, batchCount, theme, seconds }) {
     const saving = minecraftRecorder.stop();
     await window.desktop.stopParkourJob().catch(() => {});
     jobStarted = false;
-    if (saving) await saving;
+    const saved = saving ? await saving : null;
+    if (completedDuration && saved?.filePath) {
+      setStatus(`第 ${index}/${batchCount} 条：正在抽取 5 帧检查近 30 天画面重复度…`);
+      const review = await window.desktop.completeParkourJob({
+        jobId: job.jobId,
+        filePath: saved.filePath,
+      });
+      if (!review.accepted) {
+        throw new Error(`画面与近期视频过于相似（${Math.round(review.similarity * 100)}%），已移入 _similar-review 并自动换路线重录`);
+      }
+    }
     return completedDuration;
   } catch (error) {
     if (minecraftRecorder.recording) await minecraftRecorder.discard().catch(() => {});
@@ -425,6 +557,7 @@ async function recordMinecraftBatchItem({ index, batchCount, theme, seconds }) {
 
 async function waitForParkourReady(jobId, index, total) {
   const deadline = Date.now() + 240_000;
+  let lastRuntimeCheck = 0;
   while (Date.now() < deadline) {
     if (minecraftAutomationCancelled) throw new Error("用户已停止任务");
     const state = await window.desktop.getParkourStatus();
@@ -436,6 +569,13 @@ async function waitForParkourReady(jobId, index, total) {
       setStatus(`第 ${index}/${total} 条：Minecraft 正在预生成开头场景 ${built}/${Math.min(4, target || 4)}，就绪后自动录制…`);
     } else {
       setStatus(`第 ${index}/${total} 条：等待 Minecraft 接收任务，请保持在单人世界内…`);
+    }
+    if (Date.now() - lastRuntimeCheck >= 10_000) {
+      lastRuntimeCheck = Date.now();
+      const runtime = await window.desktop.getMinecraftStatus?.().catch(() => null);
+      if (runtime && runtime.running === false) {
+        throw fatalBatchError("Minecraft 游戏已经退出；任务断点已保留，并已尝试打开 Launcher");
+      }
     }
     await delay(500);
   }
@@ -453,12 +593,21 @@ async function monitorParkourRecording(jobId, milliseconds, itemIndex, batchCoun
     if (state.jobId !== jobId) throw new Error("Minecraft 跑酷任务心跳已切换或丢失");
     const heartbeatAge = Number(state.statusFileAgeMs);
     if (!Number.isFinite(heartbeatAge) || heartbeatAge > PARKOUR_HEARTBEAT_TIMEOUT_MS) {
+      const runtime = await window.desktop.getMinecraftStatus?.().catch(() => null);
+      if (runtime && runtime.running === false) {
+        throw fatalBatchError("Minecraft 游戏已经退出；任务断点已保留，并已尝试打开 Launcher");
+      }
       throw new Error(`Minecraft 心跳超过 ${PARKOUR_HEARTBEAT_TIMEOUT_MS / 1000} 秒未更新`);
     }
     if (["error", "stopped", "finished"].includes(state.state)) {
       throw new Error(state.detail || `Minecraft 跑酷任务提前进入 ${state.state} 状态`);
     }
-    const elapsedSeconds = Number(state.elapsedSeconds);
+    const statusElapsedSeconds = Number(state.elapsedSeconds);
+    const heartbeatElapsedSeconds = Number(state.heartbeatElapsedSeconds);
+    const elapsedSeconds = Math.max(
+      Number.isFinite(statusElapsedSeconds) ? statusElapsedSeconds : -1,
+      Number.isFinite(heartbeatElapsedSeconds) ? heartbeatElapsedSeconds : -1,
+    );
     if (Number.isFinite(elapsedSeconds) && elapsedSeconds > lastElapsedSeconds) {
       lastElapsedSeconds = elapsedSeconds;
       lastProgressAt = Date.now();
@@ -505,7 +654,7 @@ function initializeMinecraftTemplateOptions() {
   const select = document.querySelector("#realTheme");
   const randomOption = document.createElement("option");
   randomOption.value = "random";
-  randomOption.textContent = "每次随机 100 套模板（前100条不重复）";
+  randomOption.textContent = "每日轮换 60 个主题 · 300 套模板";
   select.replaceChildren(randomOption);
   for (const baseTheme of MINECRAFT_BASE_THEMES) {
     const group = document.createElement("optgroup");
@@ -631,6 +780,25 @@ function initializeRecordingSchedule() {
   scheduleTickTimer = window.setInterval(tickRecordingSchedule, 1000);
 }
 
+function normalizeFailedBatchItems(value, batchCount) {
+  if (!Array.isArray(value)) return [];
+  const normalized = [];
+  for (const item of value.slice(0, batchCount)) {
+    const index = Math.floor(Number(item?.index));
+    const theme = String(item?.theme || "").trim().toLowerCase();
+    if (index < 1 || index > batchCount) continue;
+    if (!document.querySelector(`#realTheme option[value="${theme}"]`)) continue;
+    normalized.push({
+      index,
+      theme,
+      error: String(item?.error || "未知异常"),
+      failedAt: Number(item?.failedAt) || Date.now(),
+    });
+  }
+  return [...new Map(normalized.map((item) => [item.index, item])).values()]
+    .sort((left, right) => left.index - right.index);
+}
+
 function normalizeBatchCheckpoint(value) {
   if (!value || typeof value !== "object") return null;
   const theme = String(value.theme || "");
@@ -641,13 +809,14 @@ function normalizeBatchCheckpoint(value) {
     + MINECRAFT_TEMPLATES.length) % MINECRAFT_TEMPLATES.length;
   const validTheme = Boolean(document.querySelector(`#realTheme option[value="${theme}"]`));
   const validDuration = Boolean(document.querySelector(`#realDuration option[value="${seconds}"]`));
-  if (!validTheme || !validDuration || nextIndex > batchCount) return null;
+  if (!validTheme || !validDuration || nextIndex > batchCount + 1) return null;
   return {
     theme,
     seconds,
     batchCount,
     nextIndex,
     templateOffset,
+    failedItems: normalizeFailedBatchItems(value.failedItems, batchCount),
     state: value.state === "paused" ? "paused" : "running",
     lastError: String(value.lastError || ""),
     updatedAt: Number(value.updatedAt) || Date.now(),
@@ -672,7 +841,10 @@ function updateBatchRecoveryUi() {
       ? "任务已暂停"
       : "检测到上次异常中断";
   const reason = batchCheckpoint.lastError ? `；原因：${batchCheckpoint.lastError}` : "";
-  recoveryStatus.textContent = `${prefix}：将从第 ${batchCheckpoint.nextIndex}/${batchCheckpoint.batchCount} 条继续，${themeName}${reason}`;
+  const progress = batchCheckpoint.nextIndex > batchCheckpoint.batchCount
+    ? `主队列已完成，将补跑 ${batchCheckpoint.failedItems.length} 条失败任务`
+    : `将从第 ${batchCheckpoint.nextIndex}/${batchCheckpoint.batchCount} 条继续`;
+  recoveryStatus.textContent = `${prefix}：${progress}，${themeName}${reason}`;
 }
 
 function saveBatchCheckpoint(value) {
@@ -706,7 +878,9 @@ function resumeBatchFromCheckpoint() {
   if (!batchCheckpoint || minecraftAutomationRunning) return;
   pendingBatchResume = { ...batchCheckpoint };
   applyScheduledParameters(batchCheckpoint);
-  setStatus(`正在从第 ${batchCheckpoint.nextIndex}/${batchCheckpoint.batchCount} 条恢复任务…`);
+  setStatus(batchCheckpoint.nextIndex > batchCheckpoint.batchCount
+    ? `正在恢复 ${batchCheckpoint.failedItems.length} 条补跑任务…`
+    : `正在从第 ${batchCheckpoint.nextIndex}/${batchCheckpoint.batchCount} 条恢复任务…`);
   startGame(true);
 }
 

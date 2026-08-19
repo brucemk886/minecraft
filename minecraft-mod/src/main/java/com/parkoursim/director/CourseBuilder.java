@@ -21,7 +21,39 @@ public final class CourseBuilder {
     private static final int TURN_SEGMENT_LENGTH = 24;
     private static final int KEYFRAME_SPACING = 8;
     private static final int HEIGHT_KEYFRAME_SPACING = 6;
+    private static final int SUBSCENES_PER_THEME = 8;
+    private static final int[][] SUBSCENE_ORDERS = {
+        {0, 1, 2, 3, 4, 5, 6, 7},
+        {0, 2, 1, 4, 3, 6, 5, 7},
+        {0, 3, 1, 5, 2, 6, 4, 7},
+        {0, 1, 4, 2, 5, 3, 6, 7},
+        {0, 4, 1, 3, 2, 5, 6, 7},
+        {0, 2, 4, 1, 5, 3, 6, 7},
+        {0, 3, 2, 4, 1, 6, 5, 7},
+        {0, 1, 3, 5, 2, 4, 6, 7}
+    };
     private static final int[] SAFE_GAP_CANDIDATES = {7, 10, 13, 16, 29, 32, 35, 38, 41};
+    private static final List<String> BASE_THEMES = List.of(
+        "village", "library", "lava", "lush", "checker", "honey",
+        "cherry", "ice", "nether", "crystal", "desert", "bamboo",
+        "ocean", "mushroom", "copper", "redstone", "quartz", "castle",
+        "melon", "coral", "rainbow", "swamp", "birch", "azalea",
+        "obsidian", "gold", "emerald", "factory", "arcade", "savanna",
+        "alpine", "jungle", "coast", "oasis", "candy", "clockwork",
+        "marble", "vineyard", "pumpkin", "aquarium", "railway", "harbor",
+        "cathedral", "dojo", "oriental", "mesa", "quarry", "greenhouse",
+        "carnival", "laboratory", "music", "bakery", "volcano", "lagoon",
+        "autumn", "winter", "dragon", "maze", "observatory", "stadium"
+    );
+    private record ThemePalette(
+        Block ground,
+        Block path,
+        Block frame,
+        Block panel,
+        Block accent,
+        Block light,
+        String name
+    ) {}
     private final Map<BlockPos, BlockState> blocks = new LinkedHashMap<>();
     private final List<Stage> stages = new ArrayList<>();
     private final int originX;
@@ -31,6 +63,10 @@ public final class CourseBuilder {
     private final String baseTheme;
     private final int templateVariant;
     private final long seed;
+    private final int paletteVariant;
+    private final int landmarkPack;
+    private final int terrainProfile;
+    private final int sceneOrderProfile;
     private final Map<Integer, int[]> xProfiles = new HashMap<>();
     private final Map<Integer, int[]> heightProfiles = new HashMap<>();
     private final Map<Integer, int[]> gapProfiles = new HashMap<>();
@@ -42,6 +78,10 @@ public final class CourseBuilder {
         this.baseTheme = baseTheme(theme);
         this.templateVariant = templateVariant(theme);
         this.seed = seed;
+        this.paletteVariant = (int) Math.floorMod(mix64(seed ^ 0x632BE59BD9B4E019L), 4);
+        this.landmarkPack = (int) Math.floorMod(mix64(seed ^ 0x8CB92BA72F3D8DD7L), 6);
+        this.terrainProfile = (int) Math.floorMod(mix64(seed ^ 0x9E3779B97F4A7C15L), 4);
+        this.sceneOrderProfile = (int) Math.floorMod(mix64(seed ^ 0xD1B54A32D192ED03L), 8);
         int baseRouteLimit = switch (this.baseTheme) {
             case "lava", "nether" -> 3;
             case "honey", "cherry" -> 4;
@@ -57,6 +97,7 @@ public final class CourseBuilder {
 
     public static CoursePlan plan(BlockPos playerOrigin, String theme) {
         CourseBuilder builder = new CourseBuilder(playerOrigin, theme, 0L);
+        for (int stage = 0; stage < 10; stage++) builder.clearKnownDecorations(stage);
         for (int stage = 0; stage < 10; stage++) builder.foundation(stage);
         for (int stage = 0; stage < 10; stage++) builder.buildTheme(theme, stage);
         builder.protectRoute(theme, 0, 10);
@@ -68,6 +109,7 @@ public final class CourseBuilder {
 
     public static CoursePlan planStage(BlockPos playerOrigin, String theme, long seed, int stage) {
         CourseBuilder builder = new CourseBuilder(playerOrigin, theme, seed);
+        builder.clearKnownDecorations(stage);
         builder.foundation(stage);
         builder.buildTheme(theme, stage);
         int protectedStart = Math.max(0, stage - 1);
@@ -80,16 +122,16 @@ public final class CourseBuilder {
 
     public static boolean isTemplateId(String theme) {
         if (theme == null) return false;
-        return theme.trim().toLowerCase().matches("^(village|library|lava|lush|checker|honey|cherry|ice|nether|crystal)-v(0[1-9]|10)$");
+        String normalized = theme.trim().toLowerCase();
+        int separator = normalized.lastIndexOf("-v");
+        if (separator <= 0 || !normalized.substring(separator + 2).matches("0[1-5]")) return false;
+        return BASE_THEMES.contains(normalized.substring(0, separator));
     }
 
     public static String baseTheme(String theme) {
         String normalized = theme == null ? "" : theme.trim().toLowerCase();
         String candidate = isTemplateId(normalized) ? normalized.substring(0, normalized.length() - 4) : normalized;
-        return switch (candidate) {
-            case "village", "library", "lava", "lush", "checker", "honey", "cherry", "ice", "nether", "crystal" -> candidate;
-            default -> "village";
-        };
+        return BASE_THEMES.contains(candidate) ? candidate : "village";
     }
 
     public static int templateVariant(String theme) {
@@ -109,6 +151,56 @@ public final class CourseBuilder {
             case "ice" -> "冰晶宫殿";
             case "nether" -> "下界熔炉";
             case "crystal" -> "紫晶花园";
+            case "desert" -> "沙漠神殿";
+            case "bamboo" -> "竹林寺院";
+            case "ocean" -> "海晶神殿";
+            case "mushroom" -> "蘑菇乐园";
+            case "copper" -> "铜艺工厂";
+            case "redstone" -> "红石机械城";
+            case "quartz" -> "白石圣殿";
+            case "castle" -> "石砖王城";
+            case "melon" -> "西瓜农庄";
+            case "coral" -> "珊瑚水庭";
+            case "rainbow" -> "彩虹玻璃城";
+            case "swamp" -> "红树林水寨";
+            case "birch" -> "白桦林庄园";
+            case "azalea" -> "杜鹃花庭院";
+            case "obsidian" -> "黑曜石要塞";
+            case "gold" -> "黄金宫殿";
+            case "emerald" -> "翡翠神殿";
+            case "factory" -> "蒸汽工厂";
+            case "arcade" -> "霓虹游戏厅";
+            case "savanna" -> "热带草原城";
+            case "alpine" -> "高山木屋";
+            case "jungle" -> "丛林神庙";
+            case "coast" -> "海岸堡垒";
+            case "oasis" -> "绿洲城邦";
+            case "candy" -> "糖果工坊";
+            case "clockwork" -> "钟表机械城";
+            case "marble" -> "大理石浴场";
+            case "vineyard" -> "葡萄庄园";
+            case "pumpkin" -> "南瓜嘉年华";
+            case "aquarium" -> "水族长廊";
+            case "railway" -> "蒸汽铁路";
+            case "harbor" -> "海港船坞";
+            case "cathedral" -> "彩窗教堂";
+            case "dojo" -> "武道庭院";
+            case "oriental" -> "东方宫殿";
+            case "mesa" -> "彩陶峡谷";
+            case "quarry" -> "石料矿场";
+            case "greenhouse" -> "玻璃温室";
+            case "carnival" -> "嘉年华乐园";
+            case "laboratory" -> "晶能实验室";
+            case "music" -> "音乐殿堂";
+            case "bakery" -> "烘焙工坊";
+            case "volcano" -> "火山神殿";
+            case "lagoon" -> "热带泻湖";
+            case "autumn" -> "秋叶庄园";
+            case "winter" -> "冬日村镇";
+            case "dragon" -> "龙纹圣殿";
+            case "maze" -> "花园迷宫";
+            case "observatory" -> "星象大厅";
+            case "stadium" -> "竞技场";
             default -> "村庄花园";
         };
         int variant = templateVariant(theme);
@@ -116,19 +208,16 @@ public final class CourseBuilder {
             case 2 -> "急弯回廊";
             case 3 -> "高低阶梯";
             case 4 -> "开阔庭院";
-            case 5 -> "双塔通道";
-            case 6 -> "连续拱门";
-            case 7 -> "峡谷折线";
-            case 8 -> "密集障碍";
-            case 9 -> "景观栈道";
-            case 10 -> "极限起伏";
+            case 5 -> "连续拱门";
             default -> "经典长廊";
         };
         return baseName + " · " + String.format("%02d", variant) + " " + style;
     }
 
     private void buildTheme(String theme, int stage) {
-        switch (baseTheme(theme)) {
+        String normalizedTheme = baseTheme(theme);
+        int subscene = subsceneIndex(stage);
+        switch (normalizedTheme) {
             case "library" -> library(stage);
             case "lava" -> lavaCanyon(stage);
             case "lush" -> lushCave(stage);
@@ -138,8 +227,11 @@ public final class CourseBuilder {
             case "ice" -> icePalace(stage);
             case "nether" -> netherForge(stage);
             case "crystal" -> crystalGarden(stage);
-            default -> village(stage);
+            case "village" -> village(stage);
+            default -> themedGallery(stage, normalizedTheme, subscene);
         }
+        decorateThemeSubscene(stage, normalizedTheme, subscene);
+        renameLatestStage(normalizedTheme, subscene);
         decorateTemplateVariant(stage);
     }
 
@@ -1005,6 +1097,327 @@ public final class CourseBuilder {
         return "紫晶花园 · " + section;
     }
 
+    private void themedGallery(int stage, String theme, int scene) {
+        int oz = stageZ(stage);
+        ThemePalette palette = extendedPalette(theme);
+        int wallTop = switch (scene) {
+            case 1 -> 7;
+            case 2 -> 12;
+            case 4 -> 10;
+            default -> 8;
+        };
+        for (int localZ = 0; localZ <= STAGE_LENGTH; localZ++) {
+            int z = oz + localZ;
+            boolean windowBand = scene == 2 && localZ % 14 >= 4 && localZ % 14 <= 9;
+            boolean openCourt = scene == 3 && localZ % 18 >= 3 && localZ % 18 <= 14;
+            for (int x = -11; x <= 11; x++) {
+                put(x, baseY - 2, z, palette.ground());
+                Block floor = Math.abs(x) <= 5
+                    ? ((localZ / 6 + scene) & 1) == 0 ? palette.path() : palette.panel()
+                    : palette.ground();
+                put(x, baseY - 1, z, floor);
+                if (!openCourt && Math.abs(x) >= 9) {
+                    for (int y = 0; y <= wallTop; y++) {
+                        Block wall = windowBand && y >= 2 && y <= wallTop - 2
+                            ? Blocks.GLASS
+                            : y == 0 || y == wallTop || localZ % 8 == 0
+                                ? palette.frame()
+                                : (x + y + localZ + scene) % 7 == 0 ? palette.accent() : palette.panel();
+                        put(x, baseY + y, z, wall);
+                    }
+                }
+            }
+            if ((scene == 1 || scene == 4) && localZ % 12 == 6) {
+                for (int x = -8; x <= 8; x++) put(x, baseY + wallTop + 1, z, palette.frame());
+                put(courseX(z), baseY + wallTop, z, palette.light());
+                put(courseX(z) + 1, baseY + wallTop, z, palette.light());
+            }
+        }
+        entryArch(oz + 1, palette.frame(), palette.light());
+        if (scene == 4) routeArch(stage, 25, palette.accent(), palette.light());
+        addPath(palette.name() + " · " + subsceneName(theme, scene), stage, palette.path());
+    }
+
+    private ThemePalette extendedPalette(String theme) {
+        ThemePalette palette = switch (theme) {
+            case "village" -> new ThemePalette(Blocks.DIRT, Blocks.MOSS_BLOCK, Blocks.OAK_LOG, Blocks.OAK_PLANKS, Blocks.COBBLESTONE, Blocks.GLOWSTONE, "村庄花园");
+            case "library" -> new ThemePalette(Blocks.STONE_BRICKS, Blocks.OAK_PLANKS, Blocks.DARK_OAK_LOG, Blocks.BOOKSHELF, Blocks.QUARTZ_BLOCK, Blocks.SEA_LANTERN, "高层图书馆");
+            case "lava" -> new ThemePalette(Blocks.MAGMA_BLOCK, Blocks.SMOOTH_SANDSTONE, Blocks.POLISHED_BLACKSTONE_BRICKS, Blocks.RED_SANDSTONE, Blocks.GOLD_BLOCK, Blocks.SHROOMLIGHT, "熔岩峡谷");
+            case "lush" -> new ThemePalette(Blocks.DEEPSLATE, Blocks.MOSS_BLOCK, Blocks.MOSSY_STONE_BRICKS, Blocks.CALCITE, Blocks.OAK_LEAVES, Blocks.GLOWSTONE, "繁茂洞穴");
+            case "checker" -> new ThemePalette(Blocks.DIRT, Blocks.QUARTZ_BLOCK, Blocks.CONCRETE.red(), Blocks.CONCRETE.white(), Blocks.GOLD_BLOCK, Blocks.SEA_LANTERN, "红白花园");
+            case "honey" -> new ThemePalette(Blocks.DEEPSLATE, Blocks.OAK_PLANKS, Blocks.HONEYCOMB_BLOCK, Blocks.SPRUCE_PLANKS, Blocks.GOLD_BLOCK, Blocks.SHROOMLIGHT, "蜂巢矿洞");
+            case "cherry" -> new ThemePalette(Blocks.GRASS_BLOCK, Blocks.CHERRY_PLANKS, Blocks.CHERRY_LOG, Blocks.QUARTZ_BLOCK, Blocks.CHERRY_LEAVES, Blocks.GLOWSTONE, "樱花高塔");
+            case "ice" -> new ThemePalette(Blocks.SNOW_BLOCK, Blocks.PACKED_ICE, Blocks.BLUE_ICE, Blocks.QUARTZ_BLOCK, Blocks.GLASS, Blocks.SEA_LANTERN, "冰晶宫殿");
+            case "nether" -> new ThemePalette(Blocks.MAGMA_BLOCK, Blocks.POLISHED_BLACKSTONE, Blocks.NETHER_BRICKS, Blocks.RED_NETHER_BRICKS, Blocks.GOLD_BLOCK, Blocks.SHROOMLIGHT, "下界熔炉");
+            case "crystal" -> new ThemePalette(Blocks.CALCITE, Blocks.PURPUR_BLOCK, Blocks.AMETHYST_BLOCK, Blocks.QUARTZ_BLOCK, Blocks.MOSS_BLOCK, Blocks.SEA_LANTERN, "紫晶花园");
+            case "desert" -> new ThemePalette(Blocks.SANDSTONE, Blocks.SMOOTH_SANDSTONE, Blocks.CHISELED_SANDSTONE, Blocks.CUT_SANDSTONE, Blocks.GOLD_BLOCK, Blocks.SEA_LANTERN, "沙漠神殿");
+            case "bamboo" -> new ThemePalette(Blocks.MOSS_BLOCK, Blocks.BAMBOO_PLANKS, Blocks.BAMBOO_BLOCK, Blocks.OAK_PLANKS, Blocks.OAK_LEAVES, Blocks.GLOWSTONE, "竹林寺院");
+            case "ocean" -> new ThemePalette(Blocks.PRISMARINE, Blocks.PRISMARINE_BRICKS, Blocks.DARK_PRISMARINE, Blocks.GLASS, Blocks.QUARTZ_BLOCK, Blocks.SEA_LANTERN, "海晶神殿");
+            case "mushroom" -> new ThemePalette(Blocks.MYCELIUM, Blocks.MUSHROOM_STEM, Blocks.RED_MUSHROOM_BLOCK, Blocks.BROWN_MUSHROOM_BLOCK, Blocks.SHROOMLIGHT, Blocks.GLOWSTONE, "蘑菇乐园");
+            case "copper" -> new ThemePalette(Blocks.STONE_BRICKS, Blocks.IRON_BLOCK, Blocks.COPPER_ORE, Blocks.POLISHED_DEEPSLATE, Blocks.GOLD_BLOCK, Blocks.GLOWSTONE, "铜艺工厂");
+            case "redstone" -> new ThemePalette(Blocks.STONE, Blocks.IRON_BLOCK, Blocks.REDSTONE_BLOCK, Blocks.POLISHED_DEEPSLATE, Blocks.GOLD_BLOCK, Blocks.SEA_LANTERN, "红石机械城");
+            case "quartz" -> new ThemePalette(Blocks.QUARTZ_BLOCK, Blocks.SMOOTH_QUARTZ, Blocks.QUARTZ_PILLAR, Blocks.GLASS, Blocks.GOLD_BLOCK, Blocks.SEA_LANTERN, "白石圣殿");
+            case "castle" -> new ThemePalette(Blocks.COBBLESTONE, Blocks.STONE_BRICKS, Blocks.MOSSY_STONE_BRICKS, Blocks.CRACKED_STONE_BRICKS, Blocks.IRON_BLOCK, Blocks.GLOWSTONE, "石砖王城");
+            case "melon" -> new ThemePalette(Blocks.DIRT, Blocks.OAK_PLANKS, Blocks.HAY_BLOCK, Blocks.GRASS_BLOCK, Blocks.MELON, Blocks.GLOWSTONE, "西瓜农庄");
+            case "coral" -> new ThemePalette(Blocks.SANDSTONE, Blocks.PRISMARINE, Blocks.SMOOTH_SANDSTONE, Blocks.AMETHYST_BLOCK, Blocks.GOLD_BLOCK, Blocks.SEA_LANTERN, "珊瑚水庭");
+            case "rainbow" -> new ThemePalette(Blocks.QUARTZ_BLOCK, Blocks.PURPUR_BLOCK, Blocks.AMETHYST_BLOCK, Blocks.GOLD_BLOCK, Blocks.EMERALD_BLOCK, Blocks.SEA_LANTERN, "彩虹玻璃城");
+            case "swamp" -> new ThemePalette(Blocks.MUD, Blocks.MANGROVE_PLANKS, Blocks.MANGROVE_LOG, Blocks.MUD_BRICKS, Blocks.MOSS_BLOCK, Blocks.SHROOMLIGHT, "红树林水寨");
+            case "birch" -> new ThemePalette(Blocks.DIRT, Blocks.BIRCH_PLANKS, Blocks.BIRCH_LOG, Blocks.QUARTZ_BLOCK, Blocks.OAK_LEAVES, Blocks.SEA_LANTERN, "白桦林庄园");
+            case "azalea" -> new ThemePalette(Blocks.MOSS_BLOCK, Blocks.MOSSY_STONE_BRICKS, Blocks.CHERRY_LOG, Blocks.CHERRY_LEAVES, Blocks.AMETHYST_BLOCK, Blocks.GLOWSTONE, "杜鹃花庭院");
+            case "obsidian" -> new ThemePalette(Blocks.BLACKSTONE, Blocks.OBSIDIAN, Blocks.CRYING_OBSIDIAN, Blocks.PURPUR_BLOCK, Blocks.AMETHYST_BLOCK, Blocks.SEA_LANTERN, "黑曜石要塞");
+            case "gold" -> new ThemePalette(Blocks.SMOOTH_SANDSTONE, Blocks.GOLD_BLOCK, Blocks.QUARTZ_PILLAR, Blocks.CHISELED_SANDSTONE, Blocks.GLOWSTONE, Blocks.SEA_LANTERN, "黄金宫殿");
+            case "emerald" -> new ThemePalette(Blocks.STONE_BRICKS, Blocks.EMERALD_BLOCK, Blocks.QUARTZ_BLOCK, Blocks.MOSS_BLOCK, Blocks.GOLD_BLOCK, Blocks.SEA_LANTERN, "翡翠神殿");
+            case "factory" -> new ThemePalette(Blocks.STONE, Blocks.IRON_BLOCK, Blocks.COPPER_ORE, Blocks.POLISHED_DEEPSLATE, Blocks.REDSTONE_BLOCK, Blocks.GLOWSTONE, "蒸汽工厂");
+            case "arcade" -> new ThemePalette(Blocks.QUARTZ_BLOCK, Blocks.AMETHYST_BLOCK, Blocks.PURPUR_BLOCK, Blocks.REDSTONE_BLOCK, Blocks.GOLD_BLOCK, Blocks.SEA_LANTERN, "霓虹游戏厅");
+            case "savanna" -> new ThemePalette(Blocks.DIRT, Blocks.ACACIA_PLANKS, Blocks.ACACIA_LOG, Blocks.BRICKS, Blocks.GOLD_BLOCK, Blocks.GLOWSTONE, "热带草原城");
+            case "alpine" -> new ThemePalette(Blocks.SNOW_BLOCK, Blocks.SPRUCE_PLANKS, Blocks.SPRUCE_LOG, Blocks.STONE_BRICKS, Blocks.BLUE_ICE, Blocks.SEA_LANTERN, "高山木屋");
+            case "jungle" -> new ThemePalette(Blocks.MOSS_BLOCK, Blocks.MOSSY_STONE_BRICKS, Blocks.JUNGLE_LOG, Blocks.JUNGLE_PLANKS, Blocks.GOLD_BLOCK, Blocks.GLOWSTONE, "丛林神庙");
+            case "coast" -> new ThemePalette(Blocks.STONE_BRICKS, Blocks.PRISMARINE_BRICKS, Blocks.COBBLESTONE, Blocks.QUARTZ_BLOCK, Blocks.DARK_PRISMARINE, Blocks.SEA_LANTERN, "海岸堡垒");
+            case "oasis" -> new ThemePalette(Blocks.SANDSTONE, Blocks.SMOOTH_SANDSTONE, Blocks.CHISELED_SANDSTONE, Blocks.OAK_LEAVES, Blocks.GOLD_BLOCK, Blocks.SEA_LANTERN, "绿洲城邦");
+            case "candy" -> new ThemePalette(Blocks.QUARTZ_BLOCK, Blocks.CONCRETE.white(), Blocks.CONCRETE.red(), Blocks.PURPUR_BLOCK, Blocks.AMETHYST_BLOCK, Blocks.SEA_LANTERN, "糖果工坊");
+            case "clockwork" -> new ThemePalette(Blocks.STONE_BRICKS, Blocks.IRON_BLOCK, Blocks.COPPER_ORE, Blocks.GOLD_BLOCK, Blocks.REDSTONE_BLOCK, Blocks.GLOWSTONE, "钟表机械城");
+            case "marble" -> new ThemePalette(Blocks.CALCITE, Blocks.SMOOTH_QUARTZ, Blocks.QUARTZ_PILLAR, Blocks.QUARTZ_BLOCK, Blocks.GOLD_BLOCK, Blocks.SEA_LANTERN, "大理石浴场");
+            case "vineyard" -> new ThemePalette(Blocks.DIRT, Blocks.OAK_PLANKS, Blocks.DARK_OAK_LOG, Blocks.MOSS_BLOCK, Blocks.AMETHYST_BLOCK, Blocks.GLOWSTONE, "葡萄庄园");
+            case "pumpkin" -> new ThemePalette(Blocks.DIRT, Blocks.HAY_BLOCK, Blocks.OAK_LOG, Blocks.OAK_PLANKS, Blocks.PUMPKIN, Blocks.GLOWSTONE, "南瓜嘉年华");
+            case "aquarium" -> new ThemePalette(Blocks.PRISMARINE, Blocks.GLASS, Blocks.DARK_PRISMARINE, Blocks.PRISMARINE_BRICKS, Blocks.AMETHYST_BLOCK, Blocks.SEA_LANTERN, "水族长廊");
+            case "railway" -> new ThemePalette(Blocks.STONE, Blocks.IRON_BLOCK, Blocks.DARK_OAK_PLANKS, Blocks.COPPER_ORE, Blocks.REDSTONE_BLOCK, Blocks.GLOWSTONE, "蒸汽铁路");
+            case "harbor" -> new ThemePalette(Blocks.COBBLESTONE, Blocks.SPRUCE_PLANKS, Blocks.SPRUCE_LOG, Blocks.PRISMARINE, Blocks.IRON_BLOCK, Blocks.SEA_LANTERN, "海港船坞");
+            case "cathedral" -> new ThemePalette(Blocks.STONE_BRICKS, Blocks.QUARTZ_BLOCK, Blocks.QUARTZ_PILLAR, Blocks.GLASS, Blocks.AMETHYST_BLOCK, Blocks.SEA_LANTERN, "彩窗教堂");
+            case "dojo" -> new ThemePalette(Blocks.DIRT, Blocks.BAMBOO_PLANKS, Blocks.DARK_OAK_LOG, Blocks.CHERRY_PLANKS, Blocks.REDSTONE_BLOCK, Blocks.GLOWSTONE, "武道庭院");
+            case "oriental" -> new ThemePalette(Blocks.STONE_BRICKS, Blocks.CHERRY_PLANKS, Blocks.RED_NETHER_BRICKS, Blocks.QUARTZ_BLOCK, Blocks.GOLD_BLOCK, Blocks.SEA_LANTERN, "东方宫殿");
+            case "mesa" -> new ThemePalette(Blocks.RED_SANDSTONE, Blocks.CUT_RED_SANDSTONE, Blocks.CHISELED_RED_SANDSTONE, Blocks.SMOOTH_SANDSTONE, Blocks.GOLD_BLOCK, Blocks.GLOWSTONE, "彩陶峡谷");
+            case "quarry" -> new ThemePalette(Blocks.STONE, Blocks.COBBLESTONE, Blocks.DEEPSLATE, Blocks.POLISHED_DEEPSLATE, Blocks.COPPER_ORE, Blocks.SEA_LANTERN, "石料矿场");
+            case "greenhouse" -> new ThemePalette(Blocks.DIRT, Blocks.MOSS_BLOCK, Blocks.QUARTZ_BLOCK, Blocks.GLASS, Blocks.CHERRY_LEAVES, Blocks.SEA_LANTERN, "玻璃温室");
+            case "carnival" -> new ThemePalette(Blocks.QUARTZ_BLOCK, Blocks.PURPUR_BLOCK, Blocks.CONCRETE.red(), Blocks.GOLD_BLOCK, Blocks.EMERALD_BLOCK, Blocks.SEA_LANTERN, "嘉年华乐园");
+            case "laboratory" -> new ThemePalette(Blocks.QUARTZ_BLOCK, Blocks.IRON_BLOCK, Blocks.GLASS, Blocks.POLISHED_DEEPSLATE, Blocks.AMETHYST_BLOCK, Blocks.SEA_LANTERN, "晶能实验室");
+            case "music" -> new ThemePalette(Blocks.DARK_OAK_PLANKS, Blocks.QUARTZ_BLOCK, Blocks.DARK_OAK_LOG, Blocks.NOTE_BLOCK, Blocks.GOLD_BLOCK, Blocks.SEA_LANTERN, "音乐殿堂");
+            case "bakery" -> new ThemePalette(Blocks.BRICKS, Blocks.OAK_PLANKS, Blocks.SMOOTH_SANDSTONE, Blocks.HAY_BLOCK, Blocks.GOLD_BLOCK, Blocks.GLOWSTONE, "烘焙工坊");
+            case "volcano" -> new ThemePalette(Blocks.MAGMA_BLOCK, Blocks.BLACKSTONE, Blocks.RED_NETHER_BRICKS, Blocks.BASALT, Blocks.GOLD_BLOCK, Blocks.SHROOMLIGHT, "火山神殿");
+            case "lagoon" -> new ThemePalette(Blocks.SANDSTONE, Blocks.PRISMARINE, Blocks.SMOOTH_SANDSTONE, Blocks.MOSS_BLOCK, Blocks.AMETHYST_BLOCK, Blocks.SEA_LANTERN, "热带泻湖");
+            case "autumn" -> new ThemePalette(Blocks.DIRT, Blocks.OAK_PLANKS, Blocks.BRICKS, Blocks.HAY_BLOCK, Blocks.RED_MUSHROOM_BLOCK, Blocks.GLOWSTONE, "秋叶庄园");
+            case "winter" -> new ThemePalette(Blocks.SNOW_BLOCK, Blocks.SPRUCE_PLANKS, Blocks.PACKED_ICE, Blocks.QUARTZ_BLOCK, Blocks.BLUE_ICE, Blocks.SEA_LANTERN, "冬日村镇");
+            case "dragon" -> new ThemePalette(Blocks.DEEPSLATE, Blocks.RED_NETHER_BRICKS, Blocks.OBSIDIAN, Blocks.POLISHED_BLACKSTONE_BRICKS, Blocks.GOLD_BLOCK, Blocks.SHROOMLIGHT, "龙纹圣殿");
+            case "maze" -> new ThemePalette(Blocks.DIRT, Blocks.MOSS_BLOCK, Blocks.MOSSY_STONE_BRICKS, Blocks.OAK_LEAVES, Blocks.QUARTZ_BLOCK, Blocks.SEA_LANTERN, "花园迷宫");
+            case "observatory" -> new ThemePalette(Blocks.QUARTZ_BLOCK, Blocks.POLISHED_DEEPSLATE, Blocks.GLASS, Blocks.AMETHYST_BLOCK, Blocks.GOLD_BLOCK, Blocks.SEA_LANTERN, "星象大厅");
+            case "stadium" -> new ThemePalette(Blocks.STONE_BRICKS, Blocks.QUARTZ_BLOCK, Blocks.CONCRETE.red(), Blocks.IRON_BLOCK, Blocks.GOLD_BLOCK, Blocks.SEA_LANTERN, "竞技场");
+            default -> new ThemePalette(Blocks.DIRT, Blocks.MOSS_BLOCK, Blocks.OAK_LOG, Blocks.OAK_PLANKS, Blocks.COBBLESTONE, Blocks.GLOWSTONE, "村庄花园");
+        };
+        return applyPaletteVariant(palette);
+    }
+
+    private ThemePalette applyPaletteVariant(ThemePalette palette) {
+        return switch (paletteVariant) {
+            case 1 -> new ThemePalette(palette.ground(), palette.panel(), palette.frame(), palette.path(), palette.accent(), palette.light(), palette.name());
+            case 2 -> new ThemePalette(palette.ground(), palette.accent(), palette.panel(), palette.frame(), palette.path(), palette.light(), palette.name());
+            case 3 -> new ThemePalette(palette.ground(), palette.path(), palette.accent(), palette.panel(), palette.frame(), palette.light(), palette.name());
+            default -> palette;
+        };
+    }
+
+    private void decorateThemeSubscene(int stage, String theme, int subscene) {
+        ThemePalette palette = extendedPalette(theme);
+        int oz = stageZ(stage);
+        int themeIndex = Math.max(0, BASE_THEMES.indexOf(theme));
+        int heightBias = themeIndex % 3 + landmarkPack % 2;
+        int positionShift = landmarkPack % 3 - 1;
+        boolean mirrored = ((themeIndex + landmarkPack) & 1) == 1;
+        switch (subscene) {
+            case 0 -> {
+                routeArch(stage, 7 + positionShift, palette.frame(), palette.light());
+                routeArch(stage, 24, palette.accent(), palette.light());
+                routeArch(stage, 41 - positionShift, palette.frame(), palette.light());
+                themePillar(mirrored ? 7 : -7, baseY, oz + 15, 5 + heightBias, palette);
+                themePillar(mirrored ? -7 : 7, baseY, oz + 33, 6 + heightBias, palette);
+            }
+            case 1 -> {
+                int[] pillarPositions = landmarkPack < 3
+                    ? new int[] {6, 15, 24, 33, 42}
+                    : new int[] {8, 18, 30, 40};
+                for (int localZ : pillarPositions) {
+                    int leftHeight = 4 + heightBias + Math.floorMod(localZ / 9, 3);
+                    int rightHeight = 6 + heightBias + Math.floorMod(localZ / 9 + 1, 3);
+                    themePillar(-7, baseY, oz + localZ, mirrored ? rightHeight : leftHeight, palette);
+                    themePillar(7, baseY, oz + localZ, mirrored ? leftHeight : rightHeight, palette);
+                }
+            }
+            case 2 -> {
+                themeWindowFrame(stage, 10 + positionShift, 8 + heightBias, palette);
+                themeWindowFrame(stage, 24, 10 + heightBias + landmarkPack / 3, palette);
+                themeWindowFrame(stage, 38 - positionShift, 8 + heightBias, palette);
+            }
+            case 3 -> {
+                for (int localZ : new int[] {8, 18, 30, 40}) {
+                    int side = ((localZ / 8 + themeIndex + landmarkPack) & 1) == 0 ? -7 : 7;
+                    themeMonument(side, baseY, oz + localZ, palette);
+                }
+                themePillar(-7, baseY, oz + 24, 7 + heightBias, palette);
+                themePillar(7, baseY, oz + 24, 7 + heightBias, palette);
+            }
+            case 4 -> {
+                themeBridgeRail(oz, -7, palette, mirrored);
+                themeBridgeRail(oz, 7, palette, !mirrored);
+                routeArch(stage, 8 + positionShift, palette.frame(), palette.light());
+                routeArch(stage, 40 - positionShift, palette.accent(), palette.light());
+            }
+            case 5 -> {
+                themeTower(-7, baseY, oz + 14 + positionShift, 8 + heightBias, palette);
+                themeTower(7, baseY, oz + 14 + positionShift, 10 + heightBias + landmarkPack / 3, palette);
+                themeTower(-7, baseY, oz + 35 - positionShift, 10 + heightBias + landmarkPack / 3, palette);
+                themeTower(7, baseY, oz + 35 - positionShift, 8 + heightBias, palette);
+                routeArch(stage, 24, palette.accent(), palette.light());
+            }
+            case 6 -> {
+                int[] canopyPositions = landmarkPack % 2 == 0
+                    ? new int[] {7, 18, 30, 41}
+                    : new int[] {9, 24, 39};
+                for (int localZ : canopyPositions) {
+                    themeCanopy(stage, localZ, 9 + heightBias, palette);
+                }
+                themeMonument(mirrored ? 7 : -7, baseY, oz + 24, palette);
+            }
+            default -> {
+                routeArch(stage, 5, palette.accent(), palette.light());
+                routeArch(stage, 24, palette.frame(), palette.light());
+                routeArch(stage, 43, palette.accent(), palette.light());
+                themeTower(-7, baseY, oz + 24, 9 + heightBias, palette);
+                themeTower(7, baseY, oz + 24, 9 + heightBias, palette);
+                themeMonument(mirrored ? -6 : 6, baseY, oz + 13, palette);
+                themeMonument(mirrored ? 6 : -6, baseY, oz + 36, palette);
+            }
+        }
+    }
+
+    private void themeWindowFrame(int stage, int localZ, int height, ThemePalette palette) {
+        int z = stageZ(stage) + localZ;
+        int center = courseX(z);
+        int left = center - 6;
+        int right = center + 7;
+        for (int y = 0; y <= height; y++) {
+            put(left, baseY + y, z, y >= 2 && y <= height - 2 ? Blocks.GLASS : palette.frame());
+            put(right, baseY + y, z, y >= 2 && y <= height - 2 ? Blocks.GLASS : palette.frame());
+        }
+        put(left, baseY + height - 1, z, palette.light());
+        put(right, baseY + height - 1, z, palette.light());
+    }
+
+    private void themeBridgeRail(int oz, int x, ThemePalette palette, boolean staggered) {
+        for (int localZ = 2; localZ < STAGE_LENGTH; localZ += 2) {
+            put(x, baseY, oz + localZ, palette.frame());
+            if ((localZ / 2 + (staggered ? 1 : 0)) % 3 == 0) put(x, baseY + 1, oz + localZ, palette.light());
+        }
+    }
+
+    private void themeTower(int x, int y, int z, int height, ThemePalette palette) {
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                for (int h = 0; h < height; h++) {
+                    boolean edge = Math.abs(dx) + Math.abs(dz) > 0;
+                    put(x + dx, y + h, z + dz, edge ? palette.frame() : palette.panel());
+                }
+            }
+        }
+        put(x, y + height, z, palette.accent());
+        put(x, y + height + 1, z, palette.light());
+    }
+
+    private void themeCanopy(int stage, int localZ, int height, ThemePalette palette) {
+        int z = stageZ(stage) + localZ;
+        int center = courseX(z);
+        for (int x = center - 7; x <= center + 8; x++) {
+            put(x, baseY + height, z, (x - center) % 4 == 0 ? palette.accent() : palette.frame());
+        }
+        put(center, baseY + height - 1, z, palette.light());
+        put(center + 1, baseY + height - 1, z, palette.light());
+    }
+
+    private void themePillar(int x, int y, int z, int height, ThemePalette palette) {
+        for (int h = 0; h < height; h++) put(x, y + h, z, h == height - 1 ? palette.light() : palette.frame());
+        put(x, y + Math.max(1, height - 2), z, palette.accent());
+    }
+
+    private void themeMonument(int x, int y, int z, ThemePalette palette) {
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) put(x + dx, y, z + dz, palette.panel());
+        }
+        put(x, y + 1, z, palette.frame());
+        put(x, y + 2, z, palette.accent());
+        put(x, y + 3, z, palette.light());
+    }
+
+    private void renameLatestStage(String theme, int subscene) {
+        if (stages.isEmpty()) return;
+        int lastIndex = stages.size() - 1;
+        Stage previous = stages.get(lastIndex);
+        stages.set(lastIndex, new Stage(extendedPalette(theme).name() + " · " + subsceneName(theme, subscene), previous.waypoints()));
+    }
+
+    private String subsceneName(String theme, int subscene) {
+        String[] names = switch (theme) {
+            case "village" -> new String[] {"村口三拱门", "果园立柱道", "钟楼高窗街", "集市纪念广场", "河畔木桥", "双风车塔道", "藤架灯廊", "庆典终点厅"};
+            case "library" -> new String[] {"迎宾书拱门", "卷轴立柱廊", "高窗阅览厅", "典籍雕像庭", "悬空书桥", "双塔藏书阁", "格栅灯廊", "穹顶总馆厅"};
+            case "lava" -> new String[] {"炽岩入口阵", "岩浆立柱谷", "熔火高窗壁", "黑石祭坛庭", "熔河石桥", "双焰塔道", "玄武岩梁廊", "火山终点厅"};
+            case "lush" -> new String[] {"苔藓石门", "垂藤立柱径", "方解石光窗", "孢子花庭", "地下溪桥", "双生树塔", "叶幕灯廊", "繁花出口厅"};
+            case "checker" -> new String[] {"红白拱门阵", "棋格立柱道", "彩窗长厅", "旗帜广场", "双色栈桥", "双旗塔道", "格纹顶廊", "冠军终点厅"};
+            case "honey" -> new String[] {"蜂巢入口门", "蜜柱运输廊", "蜂房光窗厅", "蜂王纪念庭", "蜜槽栈桥", "双巢塔道", "蜂蜡梁廊", "蜂蜜总装厅"};
+            case "cherry" -> new String[] {"花瓣山门", "樱木立柱径", "粉晶高窗厅", "花见庭院", "樱河拱桥", "双樱塔道", "花棚灯廊", "樱冠终点厅"};
+            case "ice" -> new String[] {"冰川入口门", "蓝冰立柱廊", "冰晶高窗厅", "雪花纪念庭", "冻湖透明桥", "双冰塔道", "霜梁灯廊", "极光终点厅"};
+            case "nether" -> new String[] {"黑石入口阵", "赤红立柱道", "熔炉高窗厅", "镀金祭坛庭", "岩浆跨桥", "双炉塔道", "玄武岩顶廊", "下界核心厅"};
+            case "crystal" -> new String[] {"紫晶入口门", "晶柱回廊", "方解石高窗厅", "晶簇花庭", "水晶拱桥", "双晶塔道", "晶格灯廊", "紫晶核心厅"};
+            case "desert" -> new String[] {"神殿入口门", "砂岩列柱道", "日光高窗厅", "金像庭院", "绿洲石桥", "双塔神庙道", "遮阳梁廊", "法老终点厅"};
+            case "bamboo" -> new String[] {"竹寺山门", "竹柱参道", "纸窗禅厅", "石灯庭院", "溪谷竹桥", "双阁塔道", "竹棚灯廊", "金顶大殿"};
+            case "ocean" -> new String[] {"海晶入口门", "潮汐列柱道", "水幕高窗厅", "海灯祭坛庭", "珊瑚跨海桥", "双潮塔道", "海晶梁廊", "深海核心厅"};
+            case "mushroom" -> new String[] {"菌伞入口门", "蘑菇立柱径", "孢子高窗厅", "菌环庭院", "菌丝木桥", "双菇塔道", "菌盖灯廊", "蘑菇庆典厅"};
+            case "copper" -> new String[] {"铜厂铸造门", "铆钉立柱道", "齿轮高窗厅", "铜像装配庭", "管线栈桥", "双炉塔道", "铜梁灯廊", "中央动力厅"};
+            case "redstone" -> new String[] {"机关入口门", "红石脉冲柱", "电路高窗厅", "活塞测试庭", "信号跨桥", "双控塔道", "线路顶廊", "主控核心厅"};
+            case "quartz" -> new String[] {"圣殿白石门", "石英列柱道", "日光高窗厅", "金徽庭院", "云纹石桥", "双塔圣道", "白石梁廊", "圣光终点厅"};
+            case "castle" -> new String[] {"王城吊桥门", "城墙立柱道", "箭窗大厅", "骑士雕像庭", "护城河石桥", "双堡塔道", "城梁灯廊", "王座终点厅"};
+            case "melon" -> new String[] {"农庄木门", "瓜田立柱径", "谷仓高窗厅", "丰收庭院", "灌溉渠桥", "双仓塔道", "葡萄架灯廊", "丰收庆典厅"};
+            case "coral" -> new String[] {"珊瑚水门", "礁石立柱道", "水晶高窗厅", "海葵庭院", "泻湖拱桥", "双礁塔道", "珊瑚梁廊", "海湾终点厅"};
+            case "rainbow" -> new String[] {"彩虹入口门", "七彩立柱道", "棱镜高窗厅", "光谱广场", "彩带玻璃桥", "双虹塔道", "彩光顶廊", "幻彩终点厅"};
+            case "swamp" -> new String[] {"水寨木门", "红树立柱径", "湿地高窗厅", "荷塘庭院", "沼泽木桥", "双寨塔道", "藤蔓棚廊", "红树主厅"};
+            case "birch" -> new String[] {"白桦庄园门", "白木立柱径", "明亮高窗厅", "喷泉庭院", "林溪木桥", "双庄塔道", "白桦棚廊", "庄园宴会厅"};
+            case "azalea" -> new String[] {"杜鹃花门", "苔石立柱径", "花叶高窗厅", "杜鹃庭院", "花溪拱桥", "双花塔道", "叶幕灯廊", "繁花终点厅"};
+            case "obsidian" -> new String[] {"黑曜入口门", "哭泣石柱道", "紫光高窗厅", "黑石祭坛庭", "虚空石桥", "双曜塔道", "紫晶顶廊", "黑曜核心厅"};
+            case "gold" -> new String[] {"黄金神门", "金柱礼仪道", "鎏金高窗厅", "太阳徽庭院", "黄金拱桥", "双冠塔道", "金梁灯廊", "宝库终点厅"};
+            case "emerald" -> new String[] {"翡翠入口门", "绿晶立柱道", "宝石高窗厅", "翡翠祭坛庭", "碧玉拱桥", "双翠塔道", "晶格灯廊", "翡翠核心厅"};
+            case "factory" -> new String[] {"工厂闸门", "钢柱运输道", "机房高窗厅", "装配庭院", "传送带栈桥", "双烟塔道", "钢梁灯廊", "总装终点厅"};
+            case "arcade" -> new String[] {"霓虹入口门", "像素立柱道", "游戏高窗厅", "街机广场", "光带玻璃桥", "双屏塔道", "像素顶廊", "冠军终点厅"};
+            case "savanna" -> new String[] {"草原城门", "金合欢柱道", "日照高窗厅", "部落庭院", "峡谷木桥", "双塔城道", "藤棚灯廊", "酋长终点厅"};
+            case "alpine" -> new String[] {"雪山木门", "松木立柱径", "山景高窗厅", "壁炉庭院", "冰溪木桥", "双峰塔道", "雪棚灯廊", "山庄终点厅"};
+            case "jungle" -> new String[] {"藤蔓神庙门", "雨林石柱道", "叶影高窗厅", "图腾庭院", "古树索桥", "双庙塔道", "树冠灯廊", "神庙核心厅"};
+            case "coast" -> new String[] {"临海堡门", "礁石立柱道", "海风高窗厅", "炮台庭院", "潮沟石桥", "双堡塔道", "海防梁廊", "灯塔终点厅"};
+            case "oasis" -> new String[] {"绿洲城门", "棕榈列柱道", "水景高窗厅", "喷泉庭院", "灌渠石桥", "双塔城道", "遮阳灯廊", "王庭终点厅"};
+            case "candy" -> new String[] {"糖霜入口门", "棒糖立柱道", "糖纸高窗厅", "甜点庭院", "奶油拱桥", "双糖塔道", "彩糖灯廊", "糖果终点厅"};
+            case "clockwork" -> new String[] {"齿轮城门", "发条立柱道", "钟面高窗厅", "摆轮庭院", "传动栈桥", "双钟塔道", "铜梁灯廊", "时间核心厅"};
+            case "marble" -> new String[] {"白石浴场门", "浴场列柱道", "采光高窗厅", "喷泉庭院", "水渠石桥", "双亭塔道", "石梁灯廊", "穹顶浴场厅"};
+            case "vineyard" -> new String[] {"葡萄庄园门", "藤架立柱径", "酒窖高窗厅", "品酒庭院", "溪谷木桥", "双庄塔道", "葡萄灯廊", "丰收宴会厅"};
+            case "pumpkin" -> new String[] {"南瓜庆典门", "稻草立柱径", "谷仓高窗厅", "南瓜庭院", "田沟木桥", "双仓塔道", "彩旗灯廊", "丰收终点厅"};
+            case "aquarium" -> new String[] {"水族入口门", "海草立柱道", "鱼群高窗厅", "珊瑚庭院", "玻璃水桥", "双缸塔道", "水幕灯廊", "海洋核心厅"};
+            case "railway" -> new String[] {"车站闸门", "轨枕立柱道", "候车高窗厅", "机车庭院", "铁轨栈桥", "双站塔道", "钢梁灯廊", "总站终点厅"};
+            case "harbor" -> new String[] {"船坞入口门", "桅杆立柱道", "仓库高窗厅", "码头庭院", "跨港木桥", "双塔船坞", "吊机灯廊", "港务终点厅"};
+            case "cathedral" -> new String[] {"教堂拱门", "礼拜列柱道", "彩窗大厅", "圣徽庭院", "唱诗拱桥", "双钟塔道", "穹架灯廊", "圣坛终点厅"};
+            case "dojo" -> new String[] {"道场山门", "木桩立柱径", "纸门高窗厅", "演武庭院", "枯山水桥", "双阁塔道", "竹梁灯廊", "宗师终点厅"};
+            case "oriental" -> new String[] {"朱红宫门", "御道列柱径", "雕花高窗厅", "御花庭院", "金水拱桥", "双阙塔道", "飞檐灯廊", "金殿终点厅"};
+            case "mesa" -> new String[] {"彩陶峡谷门", "赤砂立柱道", "崖壁高窗厅", "陶纹庭院", "红岩石桥", "双崖塔道", "陶梁灯廊", "峡谷终点厅"};
+            case "quarry" -> new String[] {"矿场闸门", "石料立柱道", "采石高窗厅", "吊装庭院", "矿坑栈桥", "双吊塔道", "钢架灯廊", "料场终点厅"};
+            case "greenhouse" -> new String[] {"温室玻璃门", "花架立柱径", "日照高窗厅", "喷灌庭院", "水培栈桥", "双棚塔道", "藤架灯廊", "花房终点厅"};
+            case "carnival" -> new String[] {"乐园彩门", "旋转立柱道", "票亭高窗厅", "游艺庭院", "彩灯拱桥", "双轮塔道", "旗棚灯廊", "庆典终点厅"};
+            case "laboratory" -> new String[] {"实验室气闸", "晶能立柱道", "观察高窗厅", "试验庭院", "能量栈桥", "双控塔道", "管线灯廊", "核心终点厅"};
+            case "music" -> new String[] {"乐章入口门", "琴键立柱道", "声场高窗厅", "节拍庭院", "旋律拱桥", "双音塔道", "谱架灯廊", "交响终点厅"};
+            case "bakery" -> new String[] {"烘焙坊门", "面包立柱道", "炉房高窗厅", "甜点庭院", "麦香木桥", "双炉塔道", "木梁灯廊", "宴会终点厅"};
+            case "volcano" -> new String[] {"火山神门", "熔岩立柱道", "热浪高窗厅", "火祭庭院", "岩浆石桥", "双焰塔道", "玄武灯廊", "火核终点厅"};
+            case "lagoon" -> new String[] {"泻湖水门", "棕榈立柱径", "海景高窗厅", "沙洲庭院", "浅湾木桥", "双岛塔道", "珊瑚灯廊", "海湾终点厅"};
+            case "autumn" -> new String[] {"秋叶庄园门", "枫木立柱径", "暖阳高窗厅", "落叶庭院", "林溪木桥", "双庄塔道", "叶棚灯廊", "丰收终点厅"};
+            case "winter" -> new String[] {"冬日村门", "雪松立柱径", "霜花高窗厅", "冰灯庭院", "冻河木桥", "双钟塔道", "雪棚灯廊", "节庆终点厅"};
+            case "dragon" -> new String[] {"龙纹神门", "龙柱御道", "鳞纹高窗厅", "龙徽庭院", "云纹石桥", "双龙塔道", "金梁灯廊", "龙殿终点厅"};
+            case "maze" -> new String[] {"迷宫花门", "绿篱立柱径", "花影高窗厅", "喷泉庭院", "花溪拱桥", "双亭塔道", "藤棚灯廊", "花园终点厅"};
+            case "observatory" -> new String[] {"星象入口门", "天文立柱道", "观测高窗厅", "日晷庭院", "星轨拱桥", "双镜塔道", "晶格灯廊", "穹顶终点厅"};
+            case "stadium" -> new String[] {"竞技场门", "冠军立柱道", "看台高窗厅", "奖杯庭院", "赛道拱桥", "双旗塔道", "顶棚灯廊", "冠军终点厅"};
+            default -> new String[] {"村口三拱门", "果园立柱道", "钟楼高窗街", "集市纪念广场", "河畔木桥", "双风车塔道", "藤架灯廊", "庆典终点厅"};
+        };
+        return names[Math.floorMod(subscene, SUBSCENES_PER_THEME)];
+    }
+
     private void addPath(String name, int stage, Block block) {
         List<Vec3> points = new ArrayList<>();
         int oz = stageZ(stage);
@@ -1072,7 +1485,8 @@ public final class CourseBuilder {
             case "honey" -> honeyPath(stage);
             case "nether" -> netherPath(stage);
             case "crystal" -> crystalPath(stage);
-            default -> villagePath(stage);
+            case "village" -> villagePath(stage);
+            default -> extendedPalette(baseTheme(theme)).path();
         };
     }
 
@@ -1116,15 +1530,31 @@ public final class CourseBuilder {
             case "ice" -> Blocks.BLUE_ICE;
             case "nether" -> Blocks.NETHER_BRICKS;
             case "crystal" -> Blocks.AMETHYST_BLOCK;
-            default -> Blocks.STONE_BRICKS;
+            case "village" -> Blocks.STONE_BRICKS;
+            default -> extendedPalette(baseTheme).frame();
         };
     }
 
     private Block templateLight() {
         return switch (baseTheme) {
             case "lava", "nether", "honey" -> Blocks.SHROOMLIGHT;
-            default -> Blocks.SEA_LANTERN;
+            case "village", "library", "lush", "checker", "cherry", "ice", "crystal" -> Blocks.SEA_LANTERN;
+            default -> extendedPalette(baseTheme).light();
         };
+    }
+
+    private void clearKnownDecorations(int stage) {
+        int oz = stageZ(stage);
+        int[] slices = {5, 7, 10, 14, 18, 24, 30, 35, 38, 41, 43};
+        for (int localZ : slices) {
+            int z = oz + localZ;
+            for (int x = -10; x <= 10; x++) {
+                if (Math.abs(x) >= 6) {
+                    for (int y = 0; y <= 14; y++) put(x, baseY + y, z, Blocks.AIR);
+                }
+                for (int y = 6; y <= 14; y++) put(x, baseY + y, z, Blocks.AIR);
+            }
+        }
     }
 
     private void templateGate(int stage, int localZ, int sideDistance, int height, Block frame, Block light, boolean overhead) {
@@ -1203,7 +1633,15 @@ public final class CourseBuilder {
         int[] profile = new int[STAGE_LENGTH / KEYFRAME_SPACING + 1];
         int previous = 0;
         for (int i = 1; i < profile.length - 1; i++) {
-            int value = seededInt(stage, 100 + i, routeLimit * 2 + 1) - routeLimit;
+            int randomValue = seededInt(stage, 100 + i, routeLimit * 2 + 1) - routeLimit;
+            int value = switch (terrainProfile) {
+                case 1 -> ((stage + i) & 1) == 0 ? routeLimit : -routeLimit;
+                case 2 -> Math.max(-routeLimit, Math.min(routeLimit,
+                    (i <= 2 ? 1 : -1) * (Math.max(2, routeLimit - seededInt(stage, 130 + i, 3)))));
+                case 3 -> Math.max(-routeLimit, Math.min(routeLimit,
+                    randomValue + (((stage + i) & 1) == 0 ? 2 : -2)));
+                default -> randomValue;
+            };
             if (value == previous) value = value >= routeLimit ? value - 1 : value + 1;
             profile[i] = value;
             previous = value;
@@ -1221,8 +1659,14 @@ public final class CourseBuilder {
             case 4, 9 -> 6;
             default -> 9;
         };
+        heightBound = Math.max(5, Math.min(12, heightBound + terrainProfile - 1));
         for (int i = 1; i < profile.length - 1; i++) {
-            int value = seededInt(stage, 200 + i, heightBound);
+            int value = switch (terrainProfile) {
+                case 1 -> Math.min(heightBound - 1, i * 2 + seededInt(stage, 220 + i, 2));
+                case 2 -> Math.max(0, heightBound - 2 - Math.abs(4 - i) * 2);
+                case 3 -> seededInt(stage, 230 + i, heightBound);
+                default -> seededInt(stage, 200 + i, heightBound);
+            };
             if (value > previous + 4) value = previous + 4;
             if (value < previous - 4) value = Math.max(0, previous - 4);
             profile[i] = value;
@@ -1242,6 +1686,7 @@ public final class CourseBuilder {
             case 8, 10 -> 4;
             default -> 2 + seededInt(stage, 300, 3);
         };
+        count = Math.max(2, Math.min(4, count + (terrainProfile == 3 ? 1 : 0) - (terrainProfile == 2 ? 1 : 0)));
         for (int i = 0; i < count && !candidates.isEmpty(); i++) {
             int index = seededInt(stage, 301 + i, candidates.size());
             int value = candidates.remove(index);
@@ -1254,6 +1699,16 @@ public final class CourseBuilder {
 
     private int sceneIndex(int stage) {
         return Math.floorMod(stage + seededInt(0, 400, 10) + (templateVariant - 1) * 3, 10);
+    }
+
+    private int subsceneIndex(int stage) {
+        int cycle = Math.floorDiv(stage, SUBSCENES_PER_THEME);
+        int position = Math.floorMod(stage, SUBSCENES_PER_THEME);
+        int orderIndex = Math.floorMod(
+            sceneOrderProfile + cycle + seededInt(cycle, 451, SUBSCENE_ORDERS.length),
+            SUBSCENE_ORDERS.length
+        );
+        return SUBSCENE_ORDERS[orderIndex][position];
     }
 
     private int seededInt(int stage, int salt, int bound) {
