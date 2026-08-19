@@ -34,17 +34,7 @@
           </div>
           <label for="realTheme">单条视频主题</label>
           <select id="realTheme">
-            <option value="village" selected>村庄花园</option>
-            <option value="library">高层图书馆</option>
-            <option value="lava">熔岩峡谷</option>
-            <option value="lush">繁茂洞穴</option>
-            <option value="checker">红白花园</option>
-            <option value="honey">蜂巢矿洞</option>
-            <option value="cherry">樱花高塔</option>
-            <option value="ice">冰晶宫殿</option>
-            <option value="nether">下界熔炉</option>
-            <option value="crystal">紫晶花园</option>
-            <option value="random">每次随机一个主题</option>
+            <option value="random" selected>每次随机 100 套模板（前100条不重复）</option>
           </select>
           <label for="realDuration">单条视频时长</label>
           <select id="realDuration">
@@ -56,12 +46,19 @@
             <option value="900">15 分钟</option>
           </select>
           <label for="realBatchCount">自动连续生成</label>
-          <select id="realBatchCount">
-            <option value="1" selected>1 条</option>
-            <option value="3">3 条</option>
-            <option value="5">5 条</option>
-            <option value="10">10 条</option>
-          </select>
+          <input id="realBatchCount" type="number" min="1" max="999" step="1" value="3" inputmode="numeric" />
+          <label for="scheduledStartAt">定时开始录制</label>
+          <input id="scheduledStartAt" type="datetime-local" />
+          <div class="setup-actions">
+            <button id="btnScheduleRecording" class="primary small">设置定时</button>
+            <button id="btnCancelSchedule" class="ghost small" disabled>取消定时</button>
+          </div>
+          <p id="scheduleStatus" class="key-tip">到点自动使用上面的主题、时长和条数开始。请保持本程序和 Minecraft 单人世界打开，不要锁屏。</p>
+          <div class="setup-actions">
+            <button id="btnResumeBatch" class="ghost small" disabled>恢复未完成任务</button>
+            <button id="btnDiscardBatch" class="ghost small" disabled>放弃任务断点</button>
+          </div>
+          <p id="batchRecoveryStatus" class="key-tip">暂无未完成的批量任务。</p>
           <p class="key-tip">保持 Minecraft 在单人世界内，点“自动生成并录制”即可。程序会为每条视频生成新种子、新路线，等开头场景就绪后开始录制，完成后自动保存并继续下一条。</p>
         </section>
 

@@ -8,6 +8,11 @@ import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js"
 import { ParkourPlayer } from "./player.js";
 import { ClipRecorder } from "./recorder.js";
 import { RealMinecraftRecorder } from "./minecraft.js";
+import {
+  MINECRAFT_BASE_THEMES,
+  MINECRAFT_TEMPLATES,
+  minecraftTemplateForBatchIndex,
+} from "./minecraft-templates.js";
 import { buildCourse, themeFog, themeSky } from "./themes.js";
 import { createMaterials } from "./textures.js";
 import { VoxelWorld } from "./world.js";
@@ -86,6 +91,16 @@ let atmosphere = null;
 let activeTheme = null;
 let minecraftAutomationRunning = false;
 let minecraftAutomationCancelled = false;
+let scheduledRecording = null;
+let scheduleTickTimer = 0;
+let batchCheckpoint = null;
+let pendingBatchResume = null;
+const MINECRAFT_ITEM_ATTEMPTS = 3;
+const RECORDING_SCHEDULE_KEY = "parkoursim-recording-schedule-v1";
+const BATCH_CHECKPOINT_KEY = "parkoursim-batch-checkpoint-v1";
+const PARKOUR_HEALTH_POLL_MS = 2000;
+const PARKOUR_HEARTBEAT_TIMEOUT_MS = 15_000;
+const PARKOUR_VISUAL_FREEZE_TIMEOUT_MS = 15_000;
 const forward = new THREE.Vector3();
 const profileColor = new THREE.Color();
 
@@ -237,11 +252,11 @@ function applyEnvironment(theme, dt, immediate = false) {
 
 function startGame(shouldRecord) {
   if (document.querySelector("#engine").value === "minecraft") {
-    startMinecraft(shouldRecord).catch((error) => {
+    return startMinecraft(shouldRecord).catch(async (error) => {
+      await setRecordingKeepAwake(Boolean(scheduledRecording));
       console.error(error);
       setStatus(minecraftAutomationCancelled ? "已停止" : `真实画面启动失败：${error.message || error}`);
     });
-    return;
   }
   try {
     startGameUnsafe(shouldRecord);
@@ -258,7 +273,9 @@ async function startMinecraft(shouldRecord) {
   canvas.classList.add("hidden");
   realCanvas.classList.remove("hidden");
   hint.classList.add("hidden");
-  const theme = document.querySelector("#realTheme").value;
+  const resume = shouldRecord ? pendingBatchResume : null;
+  pendingBatchResume = null;
+  const theme = resume?.theme || document.querySelector("#realTheme").value;
   if (window.desktop?.setMinecraftTheme) await window.desktop.setMinecraftTheme(theme);
   if (!shouldRecord) {
     setStatus("正在连接 Minecraft 游戏窗口…");
@@ -267,6 +284,7 @@ async function startMinecraft(shouldRecord) {
       seconds: 0,
       width: realCanvas.width,
       height: realCanvas.height,
+      theme,
     });
     return;
   }
@@ -276,48 +294,132 @@ async function startMinecraft(shouldRecord) {
     throw new Error("当前 EXE 缺少自动地图控制组件");
   }
 
+  await setRecordingKeepAwake(true);
   minecraftAutomationRunning = true;
   minecraftAutomationCancelled = false;
   const recordButton = document.querySelector("#btnRecord");
   recordButton.disabled = true;
-  const seconds = Number(document.querySelector("#realDuration").value);
-  const batchCount = Number(document.querySelector("#realBatchCount").value);
+  const seconds = resume?.seconds || Number(document.querySelector("#realDuration").value);
+  const requestedBatchCount = resume?.batchCount ?? Math.floor(Number(document.querySelector("#realBatchCount").value));
+  const batchCount = Math.max(1, Math.min(999, Number.isFinite(requestedBatchCount) ? requestedBatchCount : 1));
+  const startIndex = Math.max(1, Math.min(batchCount, Number(resume?.nextIndex) || 1));
+  const templateOffset = Number.isInteger(resume?.templateOffset)
+    ? resume.templateOffset
+    : Math.floor(Math.random() * MINECRAFT_TEMPLATES.length);
+  document.querySelector("#realBatchCount").value = String(batchCount);
+  saveBatchCheckpoint({
+    theme,
+    seconds,
+    batchCount,
+    nextIndex: startIndex,
+    templateOffset,
+    state: "running",
+    lastError: "",
+  });
   try {
-    for (let index = 1; index <= batchCount; index++) {
+    for (let index = startIndex; index <= batchCount; index++) {
       if (minecraftAutomationCancelled) break;
-      setStatus(`第 ${index}/${batchCount} 条：正在创建全新随机路线…`);
-      const job = await window.desktop.startParkourJob({ theme, durationSeconds: seconds });
-      const director = await waitForParkourReady(job.jobId, index, batchCount);
-      if (minecraftAutomationCancelled) break;
-
-      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const resolvedTheme = director.theme || job.theme;
-      const fileName = `minecraft-parkour-${resolvedTheme}-${stamp}.webm`;
-      const capture = await minecraftRecorder.start({
-        record: true,
-        seconds: 0,
-        width: realCanvas.width,
-        height: realCanvas.height,
-        fileName,
+      saveBatchCheckpoint({
+        theme,
+        seconds,
+        batchCount,
+        nextIndex: index,
+        templateOffset,
+        state: "running",
+        lastError: "",
       });
-      setStatus(`第 ${index}/${batchCount} 条正在录制 ${Math.round(seconds / 60)} 分钟：${director.themeName || resolvedTheme}`);
-      const completedDuration = await waitForDuration(seconds * 1000);
-      const saving = minecraftRecorder.stop();
-      await window.desktop.stopParkourJob().catch(() => {});
-      if (saving) await saving;
-      if (!completedDuration || minecraftAutomationCancelled) break;
+      let itemCompleted = false;
+      for (let attempt = 1; attempt <= MINECRAFT_ITEM_ATTEMPTS; attempt++) {
+        if (minecraftAutomationCancelled) break;
+        try {
+          const itemTheme = theme === "random"
+            ? minecraftTemplateForBatchIndex(index, templateOffset).id
+            : theme;
+          itemCompleted = await recordMinecraftBatchItem({ index, batchCount, theme: itemTheme, seconds });
+          break;
+        } catch (error) {
+          await minecraftRecorder.close(false).catch(() => {});
+          if (minecraftAutomationCancelled) break;
+          if (attempt >= MINECRAFT_ITEM_ATTEMPTS) {
+            throw new Error(`第 ${index}/${batchCount} 条连续 ${MINECRAFT_ITEM_ATTEMPTS} 次失败：${error.message || error}`);
+          }
+          setStatus(`第 ${index}/${batchCount} 条录制中断，正在自动重试 ${attempt + 1}/${MINECRAFT_ITEM_ATTEMPTS}…`);
+          await delay(1500 * attempt);
+        }
+      }
+      if (!itemCompleted || minecraftAutomationCancelled) break;
+      saveBatchCheckpoint({
+        theme,
+        seconds,
+        batchCount,
+        nextIndex: index + 1,
+        templateOffset,
+        state: "running",
+        lastError: "",
+      });
     }
-    if (!minecraftAutomationCancelled) setStatus(`自动批量录制完成，共 ${batchCount} 条，已保存到指定目录`);
+    if (minecraftAutomationCancelled) {
+      clearBatchCheckpoint(false);
+    } else {
+      clearBatchCheckpoint(false);
+      setStatus(`自动批量录制完成，共 ${batchCount} 条，已保存到指定目录`);
+    }
   } catch (error) {
+    pauseBatchCheckpoint(error);
     await window.desktop.stopParkourJob().catch(() => {});
-    if (minecraftRecorder.active) {
+    throw error;
+  } finally {
+    if (minecraftRecorder.recording) {
       const saving = minecraftRecorder.stop();
       if (saving) await saving.catch(() => {});
     }
-    throw error;
-  } finally {
+    await window.desktop.stopParkourJob().catch(() => {});
+    await minecraftRecorder.close(false).catch(() => {});
     minecraftAutomationRunning = false;
     recordButton.disabled = false;
+    await setRecordingKeepAwake(Boolean(scheduledRecording));
+  }
+}
+
+async function recordMinecraftBatchItem({ index, batchCount, theme, seconds }) {
+  let jobStarted = false;
+  try {
+    setStatus(`第 ${index}/${batchCount} 条：正在创建全新随机路线…`);
+    const job = await window.desktop.startParkourJob({ theme, durationSeconds: seconds });
+    jobStarted = true;
+    const director = await waitForParkourReady(job.jobId, index, batchCount);
+    if (minecraftAutomationCancelled) return false;
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const resolvedTheme = director.theme || job.theme;
+    const fileName = `minecraft-parkour-${resolvedTheme}-${stamp}.webm`;
+    const capture = await minecraftRecorder.start({
+      record: true,
+      seconds: 0,
+      width: realCanvas.width,
+      height: realCanvas.height,
+      fileName,
+      keepSource: true,
+      theme: resolvedTheme,
+    });
+    setStatus(`第 ${index}/${batchCount} 条正在录制 ${Math.round(seconds / 60)} 分钟：${director.themeName || resolvedTheme}`);
+    const completedDuration = await waitForRecordingDuration(
+      seconds * 1000,
+      capture.completion,
+      job.jobId,
+      index,
+      batchCount,
+    );
+    const saving = minecraftRecorder.stop();
+    await window.desktop.stopParkourJob().catch(() => {});
+    jobStarted = false;
+    if (saving) await saving;
+    return completedDuration;
+  } catch (error) {
+    if (minecraftRecorder.recording) await minecraftRecorder.discard().catch(() => {});
+    throw error;
+  } finally {
+    if (jobStarted) await window.desktop.stopParkourJob().catch(() => {});
   }
 }
 
@@ -340,13 +442,282 @@ async function waitForParkourReady(jobId, index, total) {
   throw new Error("等待 Minecraft 地图就绪超时，请确认已使用 Fabric 26.2 进入单人世界");
 }
 
-async function waitForDuration(milliseconds) {
+async function monitorParkourRecording(jobId, milliseconds, itemIndex, batchCount, signal) {
   const deadline = Date.now() + milliseconds;
+  let lastElapsedSeconds = -1;
+  let lastProgressAt = Date.now();
   while (Date.now() < deadline) {
+    if (signal.aborted) return false;
     if (minecraftAutomationCancelled) return false;
-    await delay(Math.min(500, deadline - Date.now()));
+    const state = await window.desktop.getParkourStatus();
+    if (state.jobId !== jobId) throw new Error("Minecraft 跑酷任务心跳已切换或丢失");
+    const heartbeatAge = Number(state.statusFileAgeMs);
+    if (!Number.isFinite(heartbeatAge) || heartbeatAge > PARKOUR_HEARTBEAT_TIMEOUT_MS) {
+      throw new Error(`Minecraft 心跳超过 ${PARKOUR_HEARTBEAT_TIMEOUT_MS / 1000} 秒未更新`);
+    }
+    if (["error", "stopped", "finished"].includes(state.state)) {
+      throw new Error(state.detail || `Minecraft 跑酷任务提前进入 ${state.state} 状态`);
+    }
+    const elapsedSeconds = Number(state.elapsedSeconds);
+    if (Number.isFinite(elapsedSeconds) && elapsedSeconds > lastElapsedSeconds) {
+      lastElapsedSeconds = elapsedSeconds;
+      lastProgressAt = Date.now();
+    }
+    if (Date.now() - lastProgressAt > PARKOUR_HEARTBEAT_TIMEOUT_MS) {
+      throw new Error(`Minecraft 跑酷进度连续 ${PARKOUR_HEARTBEAT_TIMEOUT_MS / 1000} 秒没有前进`);
+    }
+    const visualIdle = minecraftRecorder.visualIdleMilliseconds();
+    if (visualIdle > PARKOUR_VISUAL_FREEZE_TIMEOUT_MS) {
+      throw new Error(`Minecraft 画面连续 ${PARKOUR_VISUAL_FREEZE_TIMEOUT_MS / 1000} 秒静止`);
+    }
+    const remainingSeconds = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    setStatus(`第 ${itemIndex}/${batchCount} 条运行正常：已录制 ${Math.max(0, elapsedSeconds || 0)} 秒，剩余约 ${remainingSeconds} 秒`);
+    await delay(PARKOUR_HEALTH_POLL_MS);
   }
   return true;
+}
+
+async function waitForRecordingDuration(milliseconds, completion, jobId, itemIndex, batchCount) {
+  const controller = new AbortController();
+  try {
+    return await Promise.race([
+      monitorParkourRecording(jobId, milliseconds, itemIndex, batchCount, controller.signal),
+      Promise.resolve(completion).then(() => {
+        if (minecraftAutomationCancelled) return false;
+        throw new Error("Minecraft 窗口录制在预定时长前意外结束");
+      }),
+    ]);
+  } finally {
+    controller.abort();
+  }
+}
+
+function currentRecordingParameters() {
+  const requestedBatchCount = Math.floor(Number(document.querySelector("#realBatchCount").value));
+  return {
+    theme: document.querySelector("#realTheme").value,
+    seconds: Number(document.querySelector("#realDuration").value),
+    batchCount: Math.max(1, Math.min(999, Number.isFinite(requestedBatchCount) ? requestedBatchCount : 1)),
+  };
+}
+
+function initializeMinecraftTemplateOptions() {
+  const select = document.querySelector("#realTheme");
+  const randomOption = document.createElement("option");
+  randomOption.value = "random";
+  randomOption.textContent = "每次随机 100 套模板（前100条不重复）";
+  select.replaceChildren(randomOption);
+  for (const baseTheme of MINECRAFT_BASE_THEMES) {
+    const group = document.createElement("optgroup");
+    group.label = baseTheme.name;
+    for (const template of MINECRAFT_TEMPLATES.filter((item) => item.baseTheme === baseTheme.id)) {
+      const option = document.createElement("option");
+      option.value = template.id;
+      option.textContent = template.name;
+      group.append(option);
+    }
+    select.append(group);
+  }
+  select.value = "random";
+}
+
+function localDateTimeValue(timestamp) {
+  const date = new Date(timestamp);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
+function formatCountdown(milliseconds) {
+  const seconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  return hours > 0 ? `${hours} 小时 ${minutes} 分` : minutes > 0 ? `${minutes} 分 ${rest} 秒` : `${rest} 秒`;
+}
+
+async function setRecordingKeepAwake(enabled) {
+  if (!window.desktop?.setKeepAwake) return;
+  try {
+    await window.desktop.setKeepAwake(Boolean(enabled));
+  } catch (error) {
+    console.warn("设置后台运行状态失败", error);
+  }
+}
+
+function updateScheduleUi() {
+  const scheduleStatus = document.querySelector("#scheduleStatus");
+  const cancelButton = document.querySelector("#btnCancelSchedule");
+  cancelButton.disabled = !scheduledRecording;
+  if (!scheduledRecording) {
+    scheduleStatus.textContent = "到点自动使用上面的主题、时长和条数开始。请保持本程序和 Minecraft 单人世界打开，不要锁屏。";
+    return;
+  }
+  const themeSelect = document.querySelector("#realTheme");
+  const themeName = themeSelect.querySelector(`option[value="${scheduledRecording.theme}"]`)?.textContent || scheduledRecording.theme;
+  const at = new Date(scheduledRecording.startAt).toLocaleString("zh-CN", { hour12: false });
+  scheduleStatus.textContent = `已预约 ${at}，还有 ${formatCountdown(scheduledRecording.startAt - Date.now())}；${themeName}，${Math.round(scheduledRecording.seconds / 60)} 分钟 × ${scheduledRecording.batchCount} 条。`;
+}
+
+async function cancelRecordingSchedule(announce = true) {
+  scheduledRecording = null;
+  window.localStorage.removeItem(RECORDING_SCHEDULE_KEY);
+  updateScheduleUi();
+  if (!minecraftAutomationRunning) await setRecordingKeepAwake(false);
+  if (announce) setStatus("已取消定时录制");
+}
+
+async function armRecordingSchedule() {
+  const input = document.querySelector("#scheduledStartAt");
+  const startAt = new Date(input.value).getTime();
+  if (!Number.isFinite(startAt) || startAt <= Date.now() + 10_000) {
+    setStatus("请选择至少 10 秒后的开始时间");
+    return;
+  }
+  const params = currentRecordingParameters();
+  scheduledRecording = { startAt, ...params };
+  document.querySelector("#realBatchCount").value = String(params.batchCount);
+  window.localStorage.setItem(RECORDING_SCHEDULE_KEY, JSON.stringify(scheduledRecording));
+  await setRecordingKeepAwake(true);
+  updateScheduleUi();
+  setStatus("定时录制已设置，到点会自动开始整批任务");
+}
+
+function applyScheduledParameters(task) {
+  document.querySelector("#engine").value = "minecraft";
+  document.querySelector("#realTheme").value = task.theme;
+  document.querySelector("#realDuration").value = String(task.seconds);
+  document.querySelector("#realBatchCount").value = String(task.batchCount);
+  applyEngineMode();
+}
+
+function tickRecordingSchedule() {
+  if (!scheduledRecording) return;
+  if (scheduledRecording.startAt > Date.now()) {
+    updateScheduleUi();
+    return;
+  }
+  const task = scheduledRecording;
+  scheduledRecording = null;
+  window.localStorage.removeItem(RECORDING_SCHEDULE_KEY);
+  updateScheduleUi();
+  if (minecraftAutomationRunning) {
+    setStatus("定时时间已到，但已有录制任务正在运行，本次定时已跳过");
+    return;
+  }
+  clearBatchCheckpoint(false);
+  applyScheduledParameters(task);
+  setStatus("定时时间已到，正在自动开始生成并录制…");
+  startGame(true);
+}
+
+function initializeRecordingSchedule() {
+  const input = document.querySelector("#scheduledStartAt");
+  const rounded = Math.ceil((Date.now() + 10 * 60_000) / (5 * 60_000)) * 5 * 60_000;
+  input.value = localDateTimeValue(rounded);
+  try {
+    const restored = JSON.parse(window.localStorage.getItem(RECORDING_SCHEDULE_KEY) || "null");
+    if (restored && Number(restored.startAt) > Date.now()) {
+      scheduledRecording = restored;
+      input.value = localDateTimeValue(restored.startAt);
+      setRecordingKeepAwake(true);
+    } else {
+      window.localStorage.removeItem(RECORDING_SCHEDULE_KEY);
+    }
+  } catch {
+    window.localStorage.removeItem(RECORDING_SCHEDULE_KEY);
+  }
+  updateScheduleUi();
+  window.clearInterval(scheduleTickTimer);
+  scheduleTickTimer = window.setInterval(tickRecordingSchedule, 1000);
+}
+
+function normalizeBatchCheckpoint(value) {
+  if (!value || typeof value !== "object") return null;
+  const theme = String(value.theme || "");
+  const seconds = Number(value.seconds);
+  const batchCount = Math.max(1, Math.min(999, Math.floor(Number(value.batchCount)) || 1));
+  const nextIndex = Math.max(1, Math.floor(Number(value.nextIndex)) || 1);
+  const templateOffset = ((Math.floor(Number(value.templateOffset)) || 0) % MINECRAFT_TEMPLATES.length
+    + MINECRAFT_TEMPLATES.length) % MINECRAFT_TEMPLATES.length;
+  const validTheme = Boolean(document.querySelector(`#realTheme option[value="${theme}"]`));
+  const validDuration = Boolean(document.querySelector(`#realDuration option[value="${seconds}"]`));
+  if (!validTheme || !validDuration || nextIndex > batchCount) return null;
+  return {
+    theme,
+    seconds,
+    batchCount,
+    nextIndex,
+    templateOffset,
+    state: value.state === "paused" ? "paused" : "running",
+    lastError: String(value.lastError || ""),
+    updatedAt: Number(value.updatedAt) || Date.now(),
+  };
+}
+
+function updateBatchRecoveryUi() {
+  const resumeButton = document.querySelector("#btnResumeBatch");
+  const discardButton = document.querySelector("#btnDiscardBatch");
+  const recoveryStatus = document.querySelector("#batchRecoveryStatus");
+  const canManage = Boolean(batchCheckpoint) && !minecraftAutomationRunning;
+  resumeButton.disabled = !canManage;
+  discardButton.disabled = !canManage;
+  if (!batchCheckpoint) {
+    recoveryStatus.textContent = "暂无未完成的批量任务。";
+    return;
+  }
+  const themeName = document.querySelector(`#realTheme option[value="${batchCheckpoint.theme}"]`)?.textContent || batchCheckpoint.theme;
+  const prefix = minecraftAutomationRunning
+    ? "断点保护中"
+    : batchCheckpoint.state === "paused"
+      ? "任务已暂停"
+      : "检测到上次异常中断";
+  const reason = batchCheckpoint.lastError ? `；原因：${batchCheckpoint.lastError}` : "";
+  recoveryStatus.textContent = `${prefix}：将从第 ${batchCheckpoint.nextIndex}/${batchCheckpoint.batchCount} 条继续，${themeName}${reason}`;
+}
+
+function saveBatchCheckpoint(value) {
+  const checkpoint = normalizeBatchCheckpoint({ ...value, updatedAt: Date.now() });
+  if (!checkpoint) {
+    clearBatchCheckpoint(false);
+    return;
+  }
+  batchCheckpoint = checkpoint;
+  window.localStorage.setItem(BATCH_CHECKPOINT_KEY, JSON.stringify(checkpoint));
+  updateBatchRecoveryUi();
+}
+
+function pauseBatchCheckpoint(error) {
+  if (!batchCheckpoint) return;
+  saveBatchCheckpoint({
+    ...batchCheckpoint,
+    state: "paused",
+    lastError: String(error?.message || error || "未知异常"),
+  });
+}
+
+function clearBatchCheckpoint(announce = true) {
+  batchCheckpoint = null;
+  window.localStorage.removeItem(BATCH_CHECKPOINT_KEY);
+  updateBatchRecoveryUi();
+  if (announce) setStatus("已放弃未完成的批量任务断点");
+}
+
+function resumeBatchFromCheckpoint() {
+  if (!batchCheckpoint || minecraftAutomationRunning) return;
+  pendingBatchResume = { ...batchCheckpoint };
+  applyScheduledParameters(batchCheckpoint);
+  setStatus(`正在从第 ${batchCheckpoint.nextIndex}/${batchCheckpoint.batchCount} 条恢复任务…`);
+  startGame(true);
+}
+
+function initializeBatchRecovery() {
+  try {
+    batchCheckpoint = normalizeBatchCheckpoint(JSON.parse(window.localStorage.getItem(BATCH_CHECKPOINT_KEY) || "null"));
+  } catch {
+    batchCheckpoint = null;
+  }
+  if (!batchCheckpoint) window.localStorage.removeItem(BATCH_CHECKPOINT_KEY);
+  updateBatchRecoveryUi();
 }
 
 function delay(milliseconds) {
@@ -399,6 +770,7 @@ function startGameUnsafe(shouldRecord) {
 
 async function stopGame() {
   minecraftAutomationCancelled = true;
+  if (minecraftAutomationRunning || minecraftRecorder.active) clearBatchCheckpoint(false);
   if (minecraftRecorder.active) {
     const saving = minecraftRecorder.stop();
     if (window.desktop?.stopParkourJob) await window.desktop.stopParkourJob().catch(() => {});
@@ -449,8 +821,19 @@ function tick() {
 }
 
 document.querySelector("#btnStart").addEventListener("click", () => startGame(false));
-document.querySelector("#btnRecord").addEventListener("click", () => startGame(true));
-document.querySelector("#btnHalt").addEventListener("click", () => stopGame());
+document.querySelector("#btnRecord").addEventListener("click", async () => {
+  if (scheduledRecording) await cancelRecordingSchedule(false);
+  clearBatchCheckpoint(false);
+  startGame(true);
+});
+document.querySelector("#btnHalt").addEventListener("click", async () => {
+  if (scheduledRecording) await cancelRecordingSchedule(false);
+  await stopGame();
+});
+document.querySelector("#btnScheduleRecording").addEventListener("click", armRecordingSchedule);
+document.querySelector("#btnCancelSchedule").addEventListener("click", () => cancelRecordingSchedule(true));
+document.querySelector("#btnResumeBatch").addEventListener("click", resumeBatchFromCheckpoint);
+document.querySelector("#btnDiscardBatch").addEventListener("click", () => clearBatchCheckpoint(true));
 document.querySelector("#btnFolder").addEventListener("click", async () => {
   if (window.desktop?.openClips) {
     const dir = await window.desktop.openClips();
@@ -517,11 +900,14 @@ document.querySelector("#resolution").addEventListener("change", sizeRenderer);
 
 window.startGame = startGame;
 window.stopGame = stopGame;
+initializeMinecraftTemplateOptions();
 sizeRenderer();
 tick();
 applyEngineMode();
 refreshMinecraftStatus();
 refreshClipDirectory();
+initializeRecordingSchedule();
+initializeBatchRecovery();
 
 function applyEngineMode() {
   const real = document.querySelector("#engine").value === "minecraft";

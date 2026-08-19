@@ -33,13 +33,19 @@ import com.parkoursim.director.CoursePlan.Placement;
 import com.parkoursim.director.CoursePlan.Stage;
 
 public final class ParkourDirectorClient implements ClientModInitializer {
-    private static final int BUILD_BATCH = 650;
+    private static final int INITIAL_BUILD_BATCH = 320;
+    private static final int STREAM_BUILD_BATCH = 220;
     private static final double WALK_TICKS_PER_BLOCK = 3.4;
     private static final double JUMP_TICKS_PER_BLOCK = 4.25;
     private static final double JUMP_DISTANCE = 2.5;
-    private static final int PREBUILD_STAGES = 4;
-    private static final int STREAM_AHEAD_STAGES = 4;
+    private static final int WALK_LOOK_AHEAD = 7;
+    private static final int JUMP_LOOK_AHEAD = 5;
+    private static final int PREBUILD_STAGES = 3;
+    private static final int STREAM_AHEAD_STAGES = 3;
     private static final double ESTIMATED_SECONDS_PER_STAGE = 10.2;
+    private static final long FIXED_DAY_TIME = 6000L;
+    private static final int TEMPLATE_VARIANTS_PER_THEME = 10;
+    private static final int TEMPLATE_COUNT = 100;
     private static final List<String> THEMES = List.of(
         "village", "library", "lava", "lush", "checker",
         "honey", "cherry", "ice", "nether", "crystal"
@@ -65,7 +71,7 @@ public final class ParkourDirectorClient implements ClientModInitializer {
     private float cameraYaw;
     private float cameraPitch;
     private boolean cameraPoseInitialized;
-    private String selectedTheme = "village";
+    private String selectedTheme = "village-v01";
     private BlockPos courseOrigin;
     private long routeSeed;
     private int targetStages;
@@ -76,6 +82,7 @@ public final class ParkourDirectorClient implements ClientModInitializer {
     private int targetDurationSeconds = 150;
     private int jobPollTicks;
     private int statusTicks;
+    private int daylightLockTicks = 20;
     private String activeJobId = "";
     private String lastJobId = "";
 
@@ -95,6 +102,11 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         // Do not pause while the desktop recorder is focused. Start once automatically
         // after the integrated server has had a few seconds to finish loading the world.
         if (client.options != null) client.options.pauseOnLostFocus = false;
+        daylightLockTicks++;
+        if (daylightLockTicks >= 20) {
+            daylightLockTicks = 0;
+            lockBrightDay();
+        }
         jobPollTicks++;
         if (jobPollTicks >= 10) {
             jobPollTicks = 0;
@@ -154,6 +166,16 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         startJob("manual-" + System.currentTimeMillis(), theme, System.nanoTime(), durationSeconds);
     }
 
+    private void lockBrightDay() {
+        MinecraftServer server = client == null ? null : client.getSingleplayerServer();
+        if (server == null) return;
+        ServerLevel level = server.overworld();
+        server.execute(() -> level.dimensionType().defaultClock().ifPresent(clock -> {
+            server.clockManager().setTotalTicks(clock, FIXED_DAY_TIME);
+            server.clockManager().setPaused(clock, true);
+        }));
+    }
+
     private boolean startJob(String jobId, String requestedTheme, long seed, int durationSeconds) {
         MinecraftServer server = client == null ? null : client.getSingleplayerServer();
         LocalPlayer player = client == null ? null : client.player;
@@ -181,7 +203,7 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         int startX = player.getBlockX() + 192;
         int startZ = player.getBlockZ();
         int terrainY = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, startX, startZ);
-        int startY = Math.max(-40, Math.min(220, terrainY + 2));
+        int startY = Math.max(-40, Math.min(220, terrainY + 8));
         courseOrigin = new BlockPos(startX, startY, startZ);
 
         planNextStage();
@@ -212,8 +234,23 @@ public final class ParkourDirectorClient implements ClientModInitializer {
     }
 
     private static String resolveTheme(String requestedTheme, long seed) {
-        if (THEMES.contains(requestedTheme)) return requestedTheme;
-        return THEMES.get(Math.floorMod((int) mix64(seed), THEMES.size()));
+        String normalized = requestedTheme == null ? "random" : requestedTheme.trim().toLowerCase();
+        if (CourseBuilder.isTemplateId(normalized)) return normalized;
+
+        long mixed = mix64(seed);
+        if (THEMES.contains(normalized)) {
+            int variant = (int) Math.floorMod(mixed, TEMPLATE_VARIANTS_PER_THEME) + 1;
+            return templateId(normalized, variant);
+        }
+
+        int templateIndex = (int) Math.floorMod(mixed, TEMPLATE_COUNT);
+        String baseTheme = THEMES.get(templateIndex / TEMPLATE_VARIANTS_PER_THEME);
+        int variant = templateIndex % TEMPLATE_VARIANTS_PER_THEME + 1;
+        return templateId(baseTheme, variant);
+    }
+
+    private static String templateId(String baseTheme, int variant) {
+        return String.format("%s-v%02d", baseTheme, variant);
     }
 
     private int readSelectedDuration() {
@@ -295,7 +332,8 @@ public final class ParkourDirectorClient implements ClientModInitializer {
     private void buildNextBatch() {
         MinecraftServer server = client.getSingleplayerServer();
         if (server == null || plan == null) return;
-        int end = Math.min(plan.placements().size(), buildIndex + BUILD_BATCH);
+        int batchSize = running ? STREAM_BUILD_BATCH : INITIAL_BUILD_BATCH;
+        int end = Math.min(plan.placements().size(), buildIndex + batchSize);
         List<Placement> batch = new ArrayList<>(plan.placements().subList(buildIndex, end));
         buildIndex = end;
         ServerLevel level = server.overworld();
@@ -350,7 +388,7 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         changedHud = !client.gui.hud.isHidden();
         if (changedHud) client.gui.hud.toggle();
         setSpectator(true);
-        cameraYaw = lookYaw(routePoints.get(0), lookAhead(routePoints, 0, 1));
+        cameraYaw = lookYaw(routePoints.get(0), lookAhead(routePoints, 0, WALK_LOOK_AHEAD));
         cameraPitch = 16;
         cameraPoseInitialized = true;
         teleportTo(routePoints.get(0), cameraYaw, cameraPitch);
@@ -370,10 +408,11 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         Vec3 to = routePoints.get(nextIndex);
         double horizontal = Math.hypot(to.x - from.x, to.z - from.z);
         boolean needsJump = horizontal > JUMP_DISTANCE;
-        double segmentTicks = Math.max(
+        double baseSegmentTicks = Math.max(
             needsJump ? 8.0 : 3.0,
             horizontal * (needsJump ? JUMP_TICKS_PER_BLOCK : WALK_TICKS_PER_BLOCK)
         );
+        double segmentTicks = baseSegmentTicks * paceFactor();
         double t = Math.min(1.0, (segmentTick + 1) / (double) segmentTicks);
         double progress = needsJump ? smoothStep(t) : t;
         double arc = needsJump ? Math.sin(Math.PI * t) * (0.82 + Math.max(0, to.y - from.y) * 0.12) : 0;
@@ -382,20 +421,24 @@ public final class ParkourDirectorClient implements ClientModInitializer {
             lerp(from.y, to.y, progress) + arc,
             lerp(from.z, to.z, progress)
         );
-        Vec3 lookTarget = lookAhead(routePoints, nextIndex, 1);
+        Vec3 lookTarget = lookAhead(
+            routePoints,
+            nextIndex,
+            needsJump ? JUMP_LOOK_AHEAD : WALK_LOOK_AHEAD
+        );
         float targetYaw = lookYaw(position, lookTarget);
         double lookDistance = Math.max(2.5, Math.hypot(lookTarget.x - position.x, lookTarget.z - position.z));
         double eyeToTarget = position.y + 1.45 - lookTarget.y;
         float targetPitch = (float) Math.toDegrees(Math.atan2(eyeToTarget, lookDistance));
-        targetPitch = (float) Math.max(-24, Math.min(34, targetPitch));
+        targetPitch = (float) Math.max(-18, Math.min(27, targetPitch));
 
         if (!cameraPoseInitialized) {
             cameraYaw = targetYaw;
             cameraPitch = targetPitch;
             cameraPoseInitialized = true;
         } else {
-            cameraYaw = lerpAngle(cameraYaw, targetYaw, 0.28f);
-            cameraPitch += (targetPitch - cameraPitch) * 0.20f;
+            cameraYaw = lerpAngle(cameraYaw, targetYaw, 0.22f);
+            cameraPitch += (targetPitch - cameraPitch) * 0.17f;
         }
         teleportTo(position, cameraYaw, cameraPitch);
         elapsedRunTicks++;
@@ -418,6 +461,14 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         running = false;
         writeStatus("finished", "已到达本次单向路线终点");
         message("本次单向路线已完成");
+    }
+
+    private double paceFactor() {
+        return switch (CourseBuilder.baseTheme(selectedTheme)) {
+            case "village", "checker", "cherry", "crystal" -> 0.88;
+            case "library", "honey", "ice" -> 0.94;
+            default -> 0.97;
+        };
     }
 
     private void teleportTo(Vec3 position, float yaw, float pitch) {
@@ -506,6 +557,7 @@ public final class ParkourDirectorClient implements ClientModInitializer {
             String value = Files.readString(config).trim().toLowerCase();
             if ("random".equals(value)) return value;
             if (THEMES.contains(value)) return value;
+            if (CourseBuilder.isTemplateId(value)) return value;
         } catch (Exception ignored) {
             // The village theme is the safe first-run default.
         }
@@ -530,8 +582,8 @@ public final class ParkourDirectorClient implements ClientModInitializer {
         return t * t * (3.0 - 2.0 * t);
     }
 
-    private static Vec3 lookAhead(List<Vec3> points, int index, int direction) {
-        int target = index + direction * 3;
+    private static Vec3 lookAhead(List<Vec3> points, int index, int distance) {
+        int target = index + Math.max(1, distance);
         return points.get(Math.min(points.size() - 1, Math.max(0, target)));
     }
 

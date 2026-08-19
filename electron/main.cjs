@@ -1,4 +1,4 @@
-const { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, desktopCapturer, dialog, globalShortcut, ipcMain, powerSaveBlocker, screen, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
@@ -6,11 +6,13 @@ const { execFile, spawn } = require("child_process");
 
 const MINECRAFT_VERSION = "26.2";
 const FABRIC_LOADER_VERSION = "0.19.3";
-const REAL_THEMES = new Set([
+const REAL_BASE_THEMES = new Set([
   "village", "library", "lava", "lush", "checker", "honey",
-  "cherry", "ice", "nether", "crystal", "random",
+  "cherry", "ice", "nether", "crystal",
 ]);
+const TEMPLATE_ID_PATTERN = /^(village|library|lava|lush|checker|honey|cherry|ice|nether|crystal)-v(0[1-9]|10)$/;
 const recordingSessions = new Map();
+let keepAwakeBlockerId = null;
 
 app.commandLine.appendSwitch("ignore-gpu-blocklist");
 app.commandLine.appendSwitch("enable-gpu-rasterization");
@@ -118,12 +120,16 @@ function newRouteSeed() {
   return BigInt.asIntN(64, crypto.randomBytes(8).readBigUInt64LE()).toString();
 }
 
+function isRealTheme(value) {
+  return value === "random" || REAL_BASE_THEMES.has(value) || TEMPLATE_ID_PATTERN.test(value);
+}
+
 function selectedTheme() {
   try {
     const value = fs.readFileSync(themeConfigPath(), "utf8").trim().toLowerCase();
-    return REAL_THEMES.has(value) ? value : "village";
+    return isRealTheme(value) ? value : "random";
   } catch {
-    return "village";
+    return "random";
   }
 }
 
@@ -291,8 +297,23 @@ ipcMain.handle("choose-clips-directory", async () => {
   return { canceled: false, directory: setClipsDir(result.filePaths[0]) };
 });
 
+ipcMain.handle("set-keep-awake", async (_event, requestedEnabled) => {
+  const enabled = Boolean(requestedEnabled);
+  if (enabled && (keepAwakeBlockerId === null || !powerSaveBlocker.isStarted(keepAwakeBlockerId))) {
+    keepAwakeBlockerId = powerSaveBlocker.start("prevent-app-suspension");
+  } else if (!enabled && keepAwakeBlockerId !== null) {
+    if (powerSaveBlocker.isStarted(keepAwakeBlockerId)) powerSaveBlocker.stop(keepAwakeBlockerId);
+    keepAwakeBlockerId = null;
+  }
+  return { enabled, blockerId: keepAwakeBlockerId };
+});
+
 app.on("will-quit", () => {
   globalShortcut.unregisterAll();
+  if (keepAwakeBlockerId !== null && powerSaveBlocker.isStarted(keepAwakeBlockerId)) {
+    powerSaveBlocker.stop(keepAwakeBlockerId);
+  }
+  keepAwakeBlockerId = null;
   for (const session of recordingSessions.values()) {
     try { fs.closeSync(session.fd); } catch {}
   }
@@ -303,7 +324,7 @@ ipcMain.handle("minecraft-status", async () => realStatus());
 
 ipcMain.handle("start-parkour-job", async (_event, request = {}) => {
   const requestedTheme = String(request.theme || "random").trim().toLowerCase();
-  if (!REAL_THEMES.has(requestedTheme)) throw new Error("未知的 Minecraft 地图主题");
+  if (!isRealTheme(requestedTheme)) throw new Error("未知的 Minecraft 地图模板");
   const durationSeconds = Math.max(120, Math.min(900, Number.parseInt(request.durationSeconds, 10) || 150));
   const requestedSeed = String(request.seed || "").trim();
   const seed = /^-?\d+$/.test(requestedSeed) ? requestedSeed : newRouteSeed();
@@ -327,11 +348,23 @@ ipcMain.handle("stop-parkour-job", async () => {
   return { jobId };
 });
 
-ipcMain.handle("get-parkour-status", async () => parseProperties(parkourStatusPath()));
+ipcMain.handle("get-parkour-status", async () => {
+  const path = parkourStatusPath();
+  const status = parseProperties(path);
+  try {
+    const modifiedAt = fs.statSync(path).mtimeMs;
+    status.statusFileMtimeMs = modifiedAt;
+    status.statusFileAgeMs = Math.max(0, Date.now() - modifiedAt);
+  } catch {
+    status.statusFileMtimeMs = 0;
+    status.statusFileAgeMs = Number.POSITIVE_INFINITY;
+  }
+  return status;
+});
 
 ipcMain.handle("set-minecraft-theme", async (_event, requestedTheme) => {
   const theme = String(requestedTheme || "").trim().toLowerCase();
-  if (!REAL_THEMES.has(theme)) throw new Error("未知的 Minecraft 地图主题");
+  if (!isRealTheme(theme)) throw new Error("未知的 Minecraft 地图模板");
   const configPath = themeConfigPath();
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(configPath, `${theme}\n`, "utf8");
@@ -443,23 +476,27 @@ function enableIrisShader(shaderPackName) {
   } catch {
     lines = [];
   }
-  lines = lines.filter((line) => !/^\s*(enableShaders|shaderPack)=/i.test(line));
-  lines.push("enableShaders=true", `shaderPack=${shaderPackName}`);
+  lines = lines.filter((line) => !/^\s*(enableShaders|shaderPack|maxShadowRenderDistance)=/i.test(line));
+  lines.push("enableShaders=true", `shaderPack=${shaderPackName}`, "maxShadowRenderDistance=24");
   fs.writeFileSync(configPath, `${lines.filter(Boolean).join("\n")}\n`, "utf8");
 
-  // Complementary's MEDIUM profile keeps the lighting upgrade while avoiding
-  // the heavy reflection/colored-lighting passes that can stall modest GPUs.
+  optimizeMinecraftVideoSettings();
+
+  // Keep the lighting upgrade while preserving crisp source pixels for the
+  // portrait crop. Temporal AA stays enabled on its least blurry setting.
   const mediumProfile = [
     "SHADOW_QUALITY=1",
-    "shadowDistance=128.0",
+    "shadowDistance=64.0",
     "WATER_REFLECT_QUALITY=2",
     "BLOCK_REFLECT_QUALITY=1",
     "LIGHTSHAFT_QUALI_DEFINE=1",
     "SSAO_QUALI_DEFINE=2",
-    "FXAA_DEFINE=1",
+    "FXAA_DEFINE=-1",
+    "TAA_MODE=1",
+    "TAA_SMOOTHING=2",
     "DETAIL_QUALITY=2",
     "CLOUD_QUALITY=2",
-    "ANISOTROPIC_FILTER=0",
+    "ANISOTROPIC_FILTER=8",
     "COLORED_LIGHTING=0",
     "WORLD_SPACE_REFLECTIONS=-1",
     "ENTITY_SHADOW=-1",
@@ -469,11 +506,55 @@ function enableIrisShader(shaderPackName) {
     "T_VIBRANCE=1.25",
     "AMBIENT_MULT=140",
     "CAVE_LIGHTING=180",
-    "BLOOM_STRENGTH=0.10",
+    "BLOOM_STRENGTH=0.045",
+    "IMAGE_SHARPENING=5",
+    "MOTION_BLUR_EFFECT=-1",
+    "WORLD_BLUR=0",
+    "CHROMA_ABERRATION=0",
     "LESS_LAVA_FOG=true",
   ];
   const shaderOptionsPath = path.join(minecraftDir(), "shaderpacks", `${shaderPackName}.txt`);
   fs.writeFileSync(shaderOptionsPath, `${mediumProfile.join("\n")}\n`, "utf8");
+}
+
+function optimizeMinecraftVideoSettings() {
+  const optionsPath = path.join(minecraftDir(), "options.txt");
+  if (!fs.existsSync(optionsPath)) return;
+  let lines = fs.readFileSync(optionsPath, "utf8").split(/\r?\n/);
+  const windowSize = preferredMinecraftWindowSize();
+  const managed = new Map([
+    ["renderDistance", "renderDistance:12"],
+    ["simulationDistance", "simulationDistance:8"],
+    ["maxFps", "maxFps:90"],
+    ["mipmapLevels", "mipmapLevels:4"],
+    ["overrideWidth", `overrideWidth:${windowSize.width}`],
+    ["overrideHeight", `overrideHeight:${windowSize.height}`],
+    ["fullscreen", "fullscreen:false"],
+    ["exclusiveFullscreen", "exclusiveFullscreen:false"],
+  ]);
+  const found = new Set();
+  lines = lines.map((line) => {
+    const key = line.split(":", 1)[0];
+    if (!managed.has(key)) return line;
+    found.add(key);
+    return managed.get(key);
+  });
+  for (const [key, value] of managed) {
+    if (!found.has(key)) lines.push(value);
+  }
+  fs.writeFileSync(optionsPath, `${lines.filter(Boolean).join("\n")}\n`, "utf8");
+}
+
+function preferredMinecraftWindowSize() {
+  let workArea = { width: 1920, height: 1080 };
+  try {
+    workArea = screen.getPrimaryDisplay().workAreaSize;
+  } catch {}
+  const availableWidth = Math.max(640, Number(workArea.width || 1920) - 96);
+  const availableHeight = Math.max(360, Number(workArea.height || 1080) - 120);
+  const boundedWidth = Math.min(1600, availableWidth, availableHeight * (16 / 9));
+  const width = Math.max(640, Math.floor(boundedWidth / 16) * 16);
+  return { width, height: Math.round(width * (9 / 16)) };
 }
 
 function findRuntimeFile(pattern) {
@@ -512,13 +593,13 @@ function convertMp4(input, output) {
       "-map",
       "0:v:0",
       "-vf",
-      "unsharp=5:5:0.32:5:5:0.0",
+      "unsharp=5:5:0.40:5:5:0.0",
       "-c:v",
       "libx264",
       "-preset",
-      "medium",
+      "slow",
       "-crf",
-      "17",
+      "21",
       "-profile:v",
       "high",
       "-level",

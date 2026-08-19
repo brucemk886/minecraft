@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("desktop", {
   openClips: () => ipcRenderer.invoke("open-clips"),
   getClipsDirectory: () => ipcRenderer.invoke("get-clips-directory"),
   chooseClipsDirectory: () => ipcRenderer.invoke("choose-clips-directory"),
+  setKeepAwake: (enabled) => ipcRenderer.invoke("set-keep-awake", enabled),
   getMinecraftStatus: () => ipcRenderer.invoke("minecraft-status"),
   listCaptureSources: () => ipcRenderer.invoke("minecraft-sources"),
   installRealEngine: () => ipcRenderer.invoke("install-real-engine"),

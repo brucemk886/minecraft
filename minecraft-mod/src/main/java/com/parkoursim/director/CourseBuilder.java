@@ -28,7 +28,8 @@ public final class CourseBuilder {
     private final int originZ;
     private final int baseY;
     private final int routeLimit;
-    private final String theme;
+    private final String baseTheme;
+    private final int templateVariant;
     private final long seed;
     private final Map<Integer, int[]> xProfiles = new HashMap<>();
     private final Map<Integer, int[]> heightProfiles = new HashMap<>();
@@ -38,13 +39,20 @@ public final class CourseBuilder {
         originX = playerOrigin.getX();
         originZ = playerOrigin.getZ();
         baseY = Math.max(-48, Math.min(240, playerOrigin.getY()));
-        this.theme = theme;
+        this.baseTheme = baseTheme(theme);
+        this.templateVariant = templateVariant(theme);
         this.seed = seed;
-        routeLimit = switch (theme) {
+        int baseRouteLimit = switch (this.baseTheme) {
             case "lava", "nether" -> 3;
             case "honey", "cherry" -> 4;
             default -> 5;
         };
+        int routeModifier = switch (this.templateVariant) {
+            case 2, 7, 10 -> 1;
+            case 4, 9 -> -1;
+            default -> 0;
+        };
+        routeLimit = Math.max(2, Math.min(6, baseRouteLimit + routeModifier));
     }
 
     public static CoursePlan plan(BlockPos playerOrigin, String theme) {
@@ -70,8 +78,28 @@ public final class CourseBuilder {
         return new CoursePlan(placements, List.copyOf(builder.stages));
     }
 
+    public static boolean isTemplateId(String theme) {
+        if (theme == null) return false;
+        return theme.trim().toLowerCase().matches("^(village|library|lava|lush|checker|honey|cherry|ice|nether|crystal)-v(0[1-9]|10)$");
+    }
+
+    public static String baseTheme(String theme) {
+        String normalized = theme == null ? "" : theme.trim().toLowerCase();
+        String candidate = isTemplateId(normalized) ? normalized.substring(0, normalized.length() - 4) : normalized;
+        return switch (candidate) {
+            case "village", "library", "lava", "lush", "checker", "honey", "cherry", "ice", "nether", "crystal" -> candidate;
+            default -> "village";
+        };
+    }
+
+    public static int templateVariant(String theme) {
+        if (!isTemplateId(theme)) return 1;
+        String normalized = theme.trim().toLowerCase();
+        return Integer.parseInt(normalized.substring(normalized.length() - 2));
+    }
+
     public static String themeName(String theme) {
-        return switch (theme) {
+        String baseName = switch (baseTheme(theme)) {
             case "library" -> "高层图书馆";
             case "lava" -> "熔岩峡谷";
             case "lush" -> "繁茂洞穴";
@@ -83,10 +111,24 @@ public final class CourseBuilder {
             case "crystal" -> "紫晶花园";
             default -> "村庄花园";
         };
+        int variant = templateVariant(theme);
+        String style = switch (variant) {
+            case 2 -> "急弯回廊";
+            case 3 -> "高低阶梯";
+            case 4 -> "开阔庭院";
+            case 5 -> "双塔通道";
+            case 6 -> "连续拱门";
+            case 7 -> "峡谷折线";
+            case 8 -> "密集障碍";
+            case 9 -> "景观栈道";
+            case 10 -> "极限起伏";
+            default -> "经典长廊";
+        };
+        return baseName + " · " + String.format("%02d", variant) + " " + style;
     }
 
     private void buildTheme(String theme, int stage) {
-        switch (theme) {
+        switch (baseTheme(theme)) {
             case "library" -> library(stage);
             case "lava" -> lavaCanyon(stage);
             case "lush" -> lushCave(stage);
@@ -98,6 +140,7 @@ public final class CourseBuilder {
             case "crystal" -> crystalGarden(stage);
             default -> village(stage);
         }
+        decorateTemplateVariant(stage);
     }
 
     private void foundation(int stage) {
@@ -115,6 +158,8 @@ public final class CourseBuilder {
 
     private void village(int stage) {
         int oz = stageZ(stage);
+        int scene = Math.floorMod(sceneIndex(stage), 5);
+        Block path = villagePath(stage);
         for (int localZ = 0; localZ <= STAGE_LENGTH; localZ++) {
             int z = oz + localZ;
             for (int x = -11; x <= 11; x++) {
@@ -122,16 +167,54 @@ public final class CourseBuilder {
                 put(x, baseY - 1, z, Math.abs(x - courseX(z)) < 2 ? Blocks.DIRT_PATH : Blocks.GRASS_BLOCK);
             }
         }
-        for (int localZ : new int[] {5, 17, 29, 41}) {
-            tree(-8, baseY, oz + localZ);
-            tree(8, baseY, oz + localZ + 3);
+        int treeStep = scene == 3 ? 8 : 12;
+        for (int localZ = 5; localZ <= STAGE_LENGTH - 5; localZ += treeStep) {
+            int side = ((localZ / treeStep + scene) & 1) == 0 ? -1 : 1;
+            tree(side * (scene == 3 ? 6 : 8), baseY, oz + localZ);
         }
-        house(-11, baseY, oz + 9);
-        house(7, baseY, oz + 30);
-        for (int localZ = 4; localZ < STAGE_LENGTH; localZ += 8) {
-            lamp(5, baseY, oz + localZ);
+        switch (scene) {
+            case 0 -> {
+                house(-11, baseY, oz + 8);
+                house(7, baseY, oz + 30);
+            }
+            case 1 -> {
+                house(-11, baseY, oz + 20);
+                for (int localZ : new int[] {7, 23, 39}) lamp(localZ == 23 ? -5 : 5, baseY, oz + localZ);
+            }
+            case 2 -> {
+                routeArch(stage, 10, Blocks.COBBLESTONE, Blocks.GLOWSTONE);
+                routeArch(stage, 34, Blocks.STONE_BRICKS, Blocks.SEA_LANTERN);
+            }
+            case 3 -> {
+                for (int localZ : new int[] {4, 16, 28, 40}) lamp((localZ / 12 & 1) == 0 ? -5 : 5, baseY, oz + localZ);
+            }
+            default -> {
+                house(-11, baseY, oz + 28);
+                entryArch(oz + 7, Blocks.OAK_LOG, Blocks.GLOWSTONE);
+                entryArch(oz + 41, Blocks.COBBLESTONE, Blocks.SEA_LANTERN);
+            }
         }
-        addPath("村庄花园", stage, Blocks.MOSS_BLOCK);
+        addPath(villageSectionName(stage), stage, path);
+    }
+
+    private Block villagePath(int stage) {
+        return switch (Math.floorMod(sceneIndex(stage), 5)) {
+            case 1 -> Blocks.OAK_PLANKS;
+            case 2 -> Blocks.COBBLESTONE;
+            case 4 -> Blocks.STONE_BRICKS;
+            default -> Blocks.MOSS_BLOCK;
+        };
+    }
+
+    private String villageSectionName(int stage) {
+        String section = switch (Math.floorMod(sceneIndex(stage), 5)) {
+            case 1 -> "集市木栈道";
+            case 2 -> "石桥水渠";
+            case 3 -> "灯笼果园";
+            case 4 -> "村口拱门";
+            default -> "屋顶花园";
+        };
+        return "村庄花园 · " + section;
     }
 
     private void library(int stage) {
@@ -530,117 +613,258 @@ public final class CourseBuilder {
 
     private void lushCave(int stage) {
         int oz = stageZ(stage);
+        int scene = Math.floorMod(sceneIndex(stage), 5);
+        int wallStart = scene == 1 ? 9 : scene == 3 ? 6 : 7;
+        int wallTop = scene == 2 ? 13 : scene == 1 ? 7 : 10;
         for (int localZ = 0; localZ <= STAGE_LENGTH; localZ++) {
             int z = oz + localZ;
             for (int x = -10; x <= 10; x++) {
-                put(x, baseY - 4, z, Math.abs(x) < 4 ? Blocks.BLUE_ICE : Blocks.MOSS_BLOCK);
+                Block channel = scene == 4 ? Blocks.PACKED_ICE : Blocks.BLUE_ICE;
+                put(x, baseY - 4, z, Math.abs(x) < 4 ? channel : Blocks.MOSS_BLOCK);
                 if (Math.abs(x) < 5) {
                     for (int y = -3; y <= -1; y++) put(x, baseY + y, z, Blocks.AIR);
                 }
                 int edge = Math.abs(x);
-                if (edge >= 7) {
-                    for (int y = -3; y <= 10; y++) {
-                        Block type = (x + y + localZ) % 9 == 0 ? Blocks.MOSS_BLOCK : Blocks.DEEPSLATE;
+                boolean openGrotto = scene == 1 && localZ % 20 >= 5 && localZ % 20 <= 14;
+                if (!openGrotto && edge >= wallStart) {
+                    for (int y = -3; y <= wallTop; y++) {
+                        Block type = (x + y + localZ + scene) % (scene == 2 ? 6 : 9) == 0
+                            ? Blocks.MOSS_BLOCK
+                            : scene == 4 ? Blocks.CALCITE : Blocks.DEEPSLATE;
                         put(x, baseY + y, z, type);
                     }
                 }
-                if (edge > 4) put(x, baseY + 10, z, Blocks.DEEPSLATE);
+                if (scene != 1 && edge > 4) put(x, baseY + wallTop, z, scene == 4 ? Blocks.CALCITE : Blocks.DEEPSLATE);
             }
-            if (localZ % 7 == 0) {
+            if (localZ % (scene == 3 ? 5 : 7) == 0) {
                 put(-6, baseY + 5, z, Blocks.GLOWSTONE);
                 put(6, baseY + 3, z, Blocks.GLOWSTONE);
             }
         }
-        for (int localZ = 4; localZ < STAGE_LENGTH; localZ += 7) {
+        int treeStep = scene == 3 ? 6 : scene == 1 ? 12 : 8;
+        for (int localZ = 4; localZ < STAGE_LENGTH; localZ += treeStep) {
             tree(-5, baseY, oz + localZ);
             tree(5, baseY, oz + localZ + 2);
         }
         entryArch(oz + 1, Blocks.MOSSY_STONE_BRICKS, Blocks.GLOWSTONE);
-        addPath("繁茂洞穴", stage, Blocks.MOSSY_STONE_BRICKS);
+        if (scene == 2) routeArch(stage, 26, Blocks.DEEPSLATE_BRICKS, Blocks.GLOWSTONE);
+        if (scene == 4) routeArch(stage, 34, Blocks.CALCITE, Blocks.SEA_LANTERN);
+        addPath(lushSectionName(stage), stage, lushPath(stage));
+    }
+
+    private Block lushPath(int stage) {
+        return switch (Math.floorMod(sceneIndex(stage), 5)) {
+            case 1 -> Blocks.MOSS_BLOCK;
+            case 2 -> Blocks.MOSSY_STONE_BRICKS;
+            case 3 -> Blocks.OAK_PLANKS;
+            case 4 -> Blocks.CALCITE;
+            default -> Blocks.STONE_BRICKS;
+        };
+    }
+
+    private String lushSectionName(int stage) {
+        String section = switch (Math.floorMod(sceneIndex(stage), 5)) {
+            case 1 -> "露天苔藓谷";
+            case 2 -> "深岩瀑布洞";
+            case 3 -> "垂藤林间道";
+            case 4 -> "方解石水晶窟";
+            default -> "繁花洞穴入口";
+        };
+        return "繁茂洞穴 · " + section;
     }
 
     private void checkerGarden(int stage) {
         int oz = stageZ(stage);
+        int scene = Math.floorMod(sceneIndex(stage), 4);
+        int wallX = switch (scene) {
+            case 1 -> 9;
+            case 2 -> 7;
+            default -> 8;
+        };
+        int wallHeight = switch (scene) {
+            case 0 -> 6;
+            case 1 -> 4;
+            case 2 -> 8;
+            default -> 7;
+        };
         for (int localZ = 0; localZ <= STAGE_LENGTH; localZ++) {
             int z = oz + localZ;
             for (int x = -10; x <= 10; x++) {
                 put(x, baseY - 1, z, Math.abs(x) < 4 ? Blocks.GRASS_BLOCK : Blocks.DIRT);
             }
-            for (int y = 0; y <= 9; y++) {
+            boolean openBand = scene == 1 && localZ % 16 >= 5 && localZ % 16 <= 11;
+            boolean openLeft = scene == 2 && ((localZ / 8) & 1) == 0;
+            boolean openRight = scene == 2 && !openLeft;
+            for (int y = 0; y <= wallHeight; y++) {
                 Block left = ((localZ + y) & 1) == 0 ? Blocks.CONCRETE.red() : Blocks.CONCRETE.white();
                 Block right = left == Blocks.CONCRETE.red() ? Blocks.CONCRETE.white() : Blocks.CONCRETE.red();
-                put(-8, baseY + y, z, left);
-                put(-9, baseY + y, z, right);
-                put(8, baseY + y, z, right);
-                put(9, baseY + y, z, left);
+                if (!openBand && !openLeft) {
+                    put(-wallX, baseY + y, z, left);
+                    put(-wallX - 1, baseY + y, z, right);
+                }
+                if (!openBand && !openRight) {
+                    put(wallX, baseY + y, z, right);
+                    put(wallX + 1, baseY + y, z, left);
+                }
             }
         }
-        for (int localZ = 6; localZ < STAGE_LENGTH; localZ += 10) {
+        for (int localZ = 6 + scene; localZ < STAGE_LENGTH; localZ += scene == 1 ? 14 : 10) {
             lamp(-5, baseY, oz + localZ);
             lamp(5, baseY, oz + localZ + 3);
         }
         entryArch(oz + 1, Blocks.CONCRETE.red(), Blocks.SEA_LANTERN);
-        addPath("红白花园", stage, Blocks.QUARTZ_BLOCK);
+        if (scene == 2 || scene == 3) {
+            entryArch(oz + 17, Blocks.CONCRETE.white(), Blocks.GLOWSTONE);
+            entryArch(oz + 35, Blocks.CONCRETE.red(), Blocks.SEA_LANTERN);
+        }
+        addPath(checkerSectionName(stage), stage, checkerPath(stage));
+    }
+
+    private Block checkerPath(int stage) {
+        return switch (Math.floorMod(sceneIndex(stage), 4)) {
+            case 1 -> Blocks.SMOOTH_SANDSTONE;
+            case 2 -> Blocks.CONCRETE.white();
+            case 3 -> Blocks.STONE_BRICKS;
+            default -> Blocks.QUARTZ_BLOCK;
+        };
+    }
+
+    private String checkerSectionName(int stage) {
+        String section = switch (Math.floorMod(sceneIndex(stage), 4)) {
+            case 1 -> "开放看台";
+            case 2 -> "交错回廊";
+            case 3 -> "竞速拱门";
+            default -> "棋盘峡谷";
+        };
+        return "红白花园 · " + section;
     }
 
     private void honeyMine(int stage) {
         int oz = stageZ(stage);
+        int scene = Math.floorMod(sceneIndex(stage), 5);
+        int wallStart = scene == 1 ? 7 : 6;
+        int wallTop = scene == 2 ? 11 : scene == 3 ? 7 : 9;
         for (int localZ = 0; localZ <= STAGE_LENGTH; localZ++) {
             int z = oz + localZ;
             for (int x = -9; x <= 9; x++) {
                 put(x, baseY - 3, z, Blocks.DEEPSLATE);
-                if (Math.abs(x) >= 6) {
-                    for (int y = -2; y <= 9; y++) {
-                        Block type = (x * x + y + localZ) % 6 == 0 ? Blocks.HONEYCOMB_BLOCK : Blocks.COBBLED_DEEPSLATE;
+                if (Math.abs(x) >= wallStart) {
+                    for (int y = -2; y <= wallTop; y++) {
+                        boolean window = (scene == 1 || scene == 4)
+                            && localZ % 16 >= 4 && localZ % 16 <= 10 && y >= 2 && y <= 6;
+                        Block type = window
+                            ? Blocks.GLASS
+                            : (x * x + y + localZ + scene) % (scene == 2 ? 4 : 6) == 0
+                                ? Blocks.HONEYCOMB_BLOCK
+                                : Blocks.COBBLED_DEEPSLATE;
                         put(x, baseY + y, z, type);
                     }
                 }
-                if (Math.abs(x) > 3) put(x, baseY + 9, z, Blocks.COBBLED_DEEPSLATE);
+                if (scene != 1 && Math.abs(x) > 3) put(x, baseY + wallTop, z, Blocks.COBBLED_DEEPSLATE);
             }
             if (localZ % 6 == 0) {
                 put(-5, baseY + 4, z, Blocks.GLOWSTONE);
                 put(5, baseY + 6, z, Blocks.GLOWSTONE);
             }
         }
-        for (int localZ = 5; localZ < STAGE_LENGTH; localZ += 10) {
+        int archStep = scene == 3 ? 8 : scene == 1 ? 16 : 10;
+        for (int localZ = 5; localZ < STAGE_LENGTH; localZ += archStep) {
             entryArch(oz + localZ, Blocks.SPRUCE_PLANKS, Blocks.GLOWSTONE);
         }
-        addPath("蜂巢矿洞", stage, Blocks.SPRUCE_PLANKS);
+        addPath(honeySectionName(stage), stage, honeyPath(stage));
+    }
+
+    private Block honeyPath(int stage) {
+        return switch (Math.floorMod(sceneIndex(stage), 5)) {
+            case 1 -> Blocks.OAK_PLANKS;
+            case 2 -> Blocks.HONEYCOMB_BLOCK;
+            case 3 -> Blocks.DARK_OAK_PLANKS;
+            default -> Blocks.SPRUCE_PLANKS;
+        };
+    }
+
+    private String honeySectionName(int stage) {
+        String section = switch (Math.floorMod(sceneIndex(stage), 5)) {
+            case 1 -> "露天运输桥";
+            case 2 -> "蜂蜡熔炉";
+            case 3 -> "木梁升降井";
+            case 4 -> "玻璃蜂房";
+            default -> "深板岩矿廊";
+        };
+        return "蜂巢矿洞 · " + section;
     }
 
     private void sunsetTower(int stage) {
         int oz = stageZ(stage);
+        int scene = Math.floorMod(sceneIndex(stage), 5);
+        int wallStart = scene == 1 ? 9 : scene == 3 ? 7 : 6;
         for (int localZ = 0; localZ <= STAGE_LENGTH; localZ++) {
             int z = oz + localZ;
             for (int x = -10; x <= 10; x++) {
-                if (Math.abs(x) >= 6) {
-                    int height = 5 + Math.floorMod(x + localZ, 5);
+                boolean terraceGap = scene == 1 && localZ % 18 >= 4 && localZ % 18 <= 13;
+                if (!terraceGap && Math.abs(x) >= wallStart) {
+                    int height = (scene == 2 ? 9 : 5) + Math.floorMod(x + localZ + scene, 5);
                     for (int y = -3; y <= height; y++) {
-                        put(x, baseY + y, z, (x + y + localZ) % 7 == 0 ? Blocks.CHERRY_PLANKS : Blocks.SMOOTH_SANDSTONE);
+                        Block type = (x + y + localZ + scene) % 7 == 0
+                            ? Blocks.CHERRY_PLANKS
+                            : scene == 3 ? Blocks.QUARTZ_BLOCK : Blocks.SMOOTH_SANDSTONE;
+                        put(x, baseY + y, z, type);
                     }
                 } else {
                     put(x, baseY - 2, z, Blocks.GRASS_BLOCK);
                 }
             }
         }
-        for (int localZ = 4; localZ <= STAGE_LENGTH - 4; localZ += 8) {
+        int treeStep = scene == 4 ? 6 : scene == 1 ? 12 : 8;
+        for (int localZ = 4; localZ <= STAGE_LENGTH - 4; localZ += treeStep) {
             cherryTree(-5, baseY, oz + localZ);
             cherryTree(5, baseY, oz + localZ + 3);
         }
         entryArch(oz + 1, Blocks.CHERRY_PLANKS, Blocks.GLOWSTONE);
-        addPath("樱花高塔", stage, Blocks.QUARTZ_BLOCK);
+        if (scene == 2 || scene == 3) routeArch(stage, 25, Blocks.CHERRY_LOG, Blocks.SEA_LANTERN);
+        addPath(cherrySectionName(stage), stage, cherryPath(stage));
+    }
+
+    private Block cherryPath(int stage) {
+        return switch (Math.floorMod(sceneIndex(stage), 5)) {
+            case 1 -> Blocks.CHERRY_PLANKS;
+            case 2 -> Blocks.SMOOTH_SANDSTONE;
+            case 3 -> Blocks.QUARTZ_BLOCK;
+            case 4 -> Blocks.MOSS_BLOCK;
+            default -> Blocks.CALCITE;
+        };
+    }
+
+    private String cherrySectionName(int stage) {
+        String section = switch (Math.floorMod(sceneIndex(stage), 5)) {
+            case 1 -> "日落观景台";
+            case 2 -> "樱木塔楼";
+            case 3 -> "白石空中廊";
+            case 4 -> "密樱花园";
+            default -> "樱花高塔入口";
+        };
+        return "樱花高塔 · " + section;
     }
 
     private void icePalace(int stage) {
         int oz = stageZ(stage);
+        int scene = Math.floorMod(sceneIndex(stage), 5);
+        int wallX = scene == 1 ? 9 : scene == 3 ? 7 : 8;
+        int wallTop = scene == 2 ? 10 : scene == 1 ? 6 : 8;
         for (int localZ = 0; localZ <= STAGE_LENGTH; localZ++) {
             int z = oz + localZ;
             for (int x = -9; x <= 9; x++) {
                 put(x, baseY - 2, z, Blocks.SNOW_BLOCK);
                 put(x, baseY - 1, z, Math.abs(x) < 4 ? Blocks.PACKED_ICE : Blocks.BLUE_ICE);
-                if (Math.abs(x) >= 7) {
-                    for (int y = 0; y <= 8; y++) {
-                        put(x, baseY + y, z, (localZ + y) % 6 == 0 ? Blocks.SEA_LANTERN : Blocks.PACKED_ICE);
+                boolean openCourt = scene == 1 && localZ % 18 >= 5 && localZ % 18 <= 12;
+                if (!openCourt && Math.abs(x) >= wallX) {
+                    for (int y = 0; y <= wallTop; y++) {
+                        boolean window = (scene == 2 || scene == 4)
+                            && localZ % 14 >= 4 && localZ % 14 <= 9 && y >= 2 && y <= wallTop - 2;
+                        Block type = window ? Blocks.GLASS : (localZ + y + scene) % 6 == 0
+                            ? Blocks.SEA_LANTERN
+                            : Blocks.PACKED_ICE;
+                        put(x, baseY + y, z, type);
                     }
                 }
             }
@@ -649,14 +873,38 @@ public final class CourseBuilder {
                 put(5, baseY + 4, z, Blocks.SEA_LANTERN);
             }
         }
-        for (int localZ = 7; localZ < STAGE_LENGTH; localZ += 12) {
+        int archStep = scene == 3 ? 8 : scene == 1 ? 18 : 12;
+        for (int localZ = 7; localZ < STAGE_LENGTH; localZ += archStep) {
             entryArch(oz + localZ, Blocks.BLUE_ICE, Blocks.SEA_LANTERN);
         }
-        addPath("冰晶宫殿", stage, Blocks.QUARTZ_BLOCK);
+        addPath(iceSectionName(stage), stage, icePath(stage));
+    }
+
+    private Block icePath(int stage) {
+        return switch (Math.floorMod(sceneIndex(stage), 5)) {
+            case 1 -> Blocks.SNOW_BLOCK;
+            case 2 -> Blocks.PACKED_ICE;
+            case 3 -> Blocks.BLUE_ICE;
+            default -> Blocks.QUARTZ_BLOCK;
+        };
+    }
+
+    private String iceSectionName(int stage) {
+        String section = switch (Math.floorMod(sceneIndex(stage), 5)) {
+            case 1 -> "雪原露台";
+            case 2 -> "玻璃冰廊";
+            case 3 -> "蓝冰拱桥";
+            case 4 -> "海晶灯大厅";
+            default -> "白雪宫门";
+        };
+        return "冰晶宫殿 · " + section;
     }
 
     private void netherForge(int stage) {
         int oz = stageZ(stage);
+        int scene = Math.floorMod(sceneIndex(stage), 5);
+        int wallStart = scene == 1 ? 9 : scene == 3 ? 6 : 5;
+        int wallTop = scene == 2 ? 12 : scene == 1 ? 7 : 8;
         for (int localZ = 0; localZ <= STAGE_LENGTH; localZ++) {
             int z = oz + localZ;
             for (int x = -10; x <= 10; x++) {
@@ -664,44 +912,97 @@ public final class CourseBuilder {
                     put(x, baseY - 4, z, Blocks.MAGMA_BLOCK);
                     put(x, baseY - 3, z, Math.abs(x) <= 3 ? Blocks.LAVA : Blocks.BLACKSTONE);
                     for (int y = -2; y <= -1; y++) put(x, baseY + y, z, Blocks.AIR);
-                } else {
-                    for (int y = -3; y <= 8; y++) {
-                        put(x, baseY + y, z, (x + y + localZ) % 8 == 0 ? Blocks.NETHER_BRICKS : Blocks.BLACKSTONE);
+                }
+                boolean openForge = scene == 1 && localZ % 18 >= 5 && localZ % 18 <= 12;
+                if (!openForge && Math.abs(x) >= wallStart) {
+                    for (int y = -3; y <= wallTop; y++) {
+                        Block body = scene == 3 ? Blocks.RED_NETHER_BRICKS : scene == 4 ? Blocks.BASALT : Blocks.BLACKSTONE;
+                        put(x, baseY + y, z, (x + y + localZ + scene) % 8 == 0 ? Blocks.NETHER_BRICKS : body);
                     }
                 }
             }
-            if (localZ % 7 == 0) {
+            if (localZ % (scene == 2 ? 5 : 7) == 0) {
                 put(-6, baseY + 4, z, Blocks.SHROOMLIGHT);
                 put(6, baseY + 6, z, Blocks.SHROOMLIGHT);
             }
         }
-        for (int localZ = 4; localZ < STAGE_LENGTH; localZ += 9) {
+        int archStep = scene == 3 ? 7 : scene == 1 ? 15 : 9;
+        for (int localZ = 4; localZ < STAGE_LENGTH; localZ += archStep) {
             entryArch(oz + localZ, Blocks.NETHER_BRICKS, Blocks.SHROOMLIGHT);
         }
-        addPath("下界熔炉", stage, Blocks.BLACKSTONE);
+        addPath(netherSectionName(stage), stage, netherPath(stage));
+    }
+
+    private Block netherPath(int stage) {
+        return switch (Math.floorMod(sceneIndex(stage), 5)) {
+            case 1 -> Blocks.POLISHED_BLACKSTONE;
+            case 2 -> Blocks.NETHER_BRICKS;
+            case 3 -> Blocks.RED_NETHER_BRICKS;
+            case 4 -> Blocks.SMOOTH_BASALT;
+            default -> Blocks.BLACKSTONE;
+        };
+    }
+
+    private String netherSectionName(int stage) {
+        String section = switch (Math.floorMod(sceneIndex(stage), 5)) {
+            case 1 -> "露天锻造台";
+            case 2 -> "炽热机械厅";
+            case 3 -> "赤红拱门阵";
+            case 4 -> "玄武岩烟道";
+            default -> "下界熔炉入口";
+        };
+        return "下界熔炉 · " + section;
     }
 
     private void crystalGarden(int stage) {
         int oz = stageZ(stage);
+        int scene = Math.floorMod(sceneIndex(stage), 5);
+        int wallX = scene == 1 ? 10 : scene == 3 ? 7 : 8;
+        int wallTop = scene == 2 ? 12 : scene == 1 ? 6 : 9;
         for (int localZ = 0; localZ <= STAGE_LENGTH; localZ++) {
             int z = oz + localZ;
             for (int x = -10; x <= 10; x++) {
                 put(x, baseY - 2, z, Blocks.CALCITE);
                 put(x, baseY - 1, z, Math.abs(x) < 5 ? Blocks.MOSS_BLOCK : Blocks.AMETHYST_BLOCK);
-                if (Math.abs(x) >= 8) {
-                    for (int y = 0; y <= 9; y++) {
-                        Block type = (x + y + localZ) % 5 == 0 ? Blocks.AMETHYST_BLOCK : Blocks.CALCITE;
+                boolean openCourt = scene == 1 && localZ % 18 >= 4 && localZ % 18 <= 13;
+                if (!openCourt && Math.abs(x) >= wallX) {
+                    for (int y = 0; y <= wallTop; y++) {
+                        boolean window = scene == 4 && localZ % 14 >= 4 && localZ % 14 <= 9 && y >= 2 && y <= 6;
+                        Block type = window ? Blocks.GLASS
+                            : (x + y + localZ + scene) % 5 == 0 ? Blocks.AMETHYST_BLOCK : Blocks.CALCITE;
                         put(x, baseY + y, z, type);
                     }
                 }
             }
         }
-        for (int localZ = 4; localZ < STAGE_LENGTH; localZ += 8) {
-            crystalPillar(-5, baseY, oz + localZ, 3 + localZ % 4);
-            crystalPillar(5, baseY, oz + localZ + 3, 4 + localZ % 3);
+        int pillarStep = scene == 2 ? 6 : scene == 1 ? 12 : 8;
+        for (int localZ = 4; localZ < STAGE_LENGTH; localZ += pillarStep) {
+            crystalPillar(-5, baseY, oz + localZ, 3 + Math.floorMod(localZ + scene, 4));
+            crystalPillar(5, baseY, oz + localZ + 3, 4 + Math.floorMod(localZ + scene, 3));
         }
         entryArch(oz + 1, Blocks.AMETHYST_BLOCK, Blocks.SEA_LANTERN);
-        addPath("紫晶花园", stage, Blocks.PURPUR_BLOCK);
+        if (scene == 3) entryArch(oz + 25, Blocks.CALCITE, Blocks.SEA_LANTERN);
+        addPath(crystalSectionName(stage), stage, crystalPath(stage));
+    }
+
+    private Block crystalPath(int stage) {
+        return switch (Math.floorMod(sceneIndex(stage), 5)) {
+            case 1 -> Blocks.CALCITE;
+            case 2 -> Blocks.AMETHYST_BLOCK;
+            case 4 -> Blocks.QUARTZ_BLOCK;
+            default -> Blocks.PURPUR_BLOCK;
+        };
+    }
+
+    private String crystalSectionName(int stage) {
+        String section = switch (Math.floorMod(sceneIndex(stage), 5)) {
+            case 1 -> "开阔水晶庭院";
+            case 2 -> "紫晶尖塔林";
+            case 3 -> "方解石拱桥";
+            case 4 -> "玻璃观景廊";
+            default -> "紫晶花园门厅";
+        };
+        return "紫晶花园 · " + section;
     }
 
     private void addPath(String name, int stage, Block block) {
@@ -748,25 +1049,99 @@ public final class CourseBuilder {
             put(x + 1, supportY, globalZ, block);
         }
         int stage = Math.max(0, Math.floorDiv(globalZ, STAGE_LENGTH));
-        if ("lava".equals(theme) && isLandingMarker(stage, zOffset)) {
+        if ("lava".equals(baseTheme) && isLandingMarker(stage, zOffset)) {
             put(x, blockY, globalZ, Blocks.SHROOMLIGHT);
             put(x + 1, blockY, globalZ, Blocks.SHROOMLIGHT);
         }
         if (zOffset % 7 == 3) put(x - 1, blockY, globalZ, block);
         clearHeadroom(x, blockY, globalZ);
+        if (zOffset % 6 == 3) {
+            put(x - 2, blockY + 3, globalZ, Blocks.LIGHT);
+            put(x + 3, blockY + 3, globalZ, Blocks.LIGHT);
+        }
     }
 
     private Block pathBlockForTheme(String theme, int stage) {
-        return switch (theme) {
+        return switch (baseTheme(theme)) {
             case "library" -> libraryPath(sceneIndex(stage));
             case "lava" -> lavaPath(stage);
-            case "lush" -> Blocks.MOSSY_STONE_BRICKS;
-            case "checker", "cherry", "ice" -> Blocks.QUARTZ_BLOCK;
-            case "honey" -> Blocks.SPRUCE_PLANKS;
-            case "nether" -> Blocks.BLACKSTONE;
-            case "crystal" -> Blocks.PURPUR_BLOCK;
-            default -> Blocks.MOSS_BLOCK;
+            case "lush" -> lushPath(stage);
+            case "checker" -> checkerPath(stage);
+            case "cherry" -> cherryPath(stage);
+            case "ice" -> icePath(stage);
+            case "honey" -> honeyPath(stage);
+            case "nether" -> netherPath(stage);
+            case "crystal" -> crystalPath(stage);
+            default -> villagePath(stage);
         };
+    }
+
+    private void decorateTemplateVariant(int stage) {
+        if (templateVariant == 1) return;
+        int[] positions = switch (templateVariant) {
+            case 2 -> new int[] {12, 36};
+            case 3 -> new int[] {16, 32};
+            case 4 -> new int[] {24};
+            case 5 -> new int[] {10, 24, 38};
+            case 6 -> new int[] {8, 20, 32, 44};
+            case 7 -> new int[] {10, 26, 42};
+            case 8 -> new int[] {7, 15, 23, 31, 39};
+            case 9 -> new int[] {18, 36};
+            default -> new int[] {9, 21, 33, 45};
+        };
+        boolean overhead = templateVariant == 3 || templateVariant == 6 || templateVariant == 10;
+        int height = switch (templateVariant) {
+            case 5, 10 -> 9;
+            case 4, 9 -> 5;
+            default -> 7;
+        };
+        int sideDistance = switch (templateVariant) {
+            case 4, 9 -> Math.max(9, routeLimit + 3);
+            case 8 -> Math.max(5, routeLimit + 1);
+            default -> Math.max(6, routeLimit + 2);
+        };
+        Block frame = templateFrame(stage);
+        Block light = templateLight();
+        for (int localZ : positions) templateGate(stage, localZ, sideDistance, height, frame, light, overhead);
+    }
+
+    private Block templateFrame(int stage) {
+        return switch (baseTheme) {
+            case "library" -> Blocks.DARK_OAK_PLANKS;
+            case "lava" -> lavaWall(stage);
+            case "lush" -> Blocks.MOSSY_STONE_BRICKS;
+            case "checker" -> Blocks.CONCRETE.red();
+            case "honey" -> Blocks.HONEYCOMB_BLOCK;
+            case "cherry" -> Blocks.CHERRY_PLANKS;
+            case "ice" -> Blocks.BLUE_ICE;
+            case "nether" -> Blocks.NETHER_BRICKS;
+            case "crystal" -> Blocks.AMETHYST_BLOCK;
+            default -> Blocks.STONE_BRICKS;
+        };
+    }
+
+    private Block templateLight() {
+        return switch (baseTheme) {
+            case "lava", "nether", "honey" -> Blocks.SHROOMLIGHT;
+            default -> Blocks.SEA_LANTERN;
+        };
+    }
+
+    private void templateGate(int stage, int localZ, int sideDistance, int height, Block frame, Block light, boolean overhead) {
+        int z = stageZ(stage) + localZ;
+        int center = courseX(z);
+        int floorY = baseY - 1 + pathHeight(stage, localZ);
+        int left = center - sideDistance;
+        int right = center + sideDistance + 1;
+        for (int y = baseY - 1; y <= floorY + height; y++) {
+            put(left, y, z, y == floorY + height - 1 ? light : frame);
+            put(right, y, z, y == floorY + height - 1 ? light : frame);
+        }
+        if (overhead) {
+            for (int x = left; x <= right; x++) put(x, floorY + height, z, frame);
+            put(center, floorY + height, z, light);
+            put(center + 1, floorY + height, z, light);
+        }
     }
 
     private int pathHeight(int stage, int zOffset) {
@@ -791,9 +1166,9 @@ public final class CourseBuilder {
     }
 
     private void clearGap(int centerX, int z) {
-        int left = "lava".equals(theme) ? -3 : -2;
-        int right = "lava".equals(theme) ? 4 : 3;
-        int top = "lava".equals(theme) ? baseY + 15 : baseY + 13;
+        int left = "lava".equals(baseTheme) ? -3 : -2;
+        int right = "lava".equals(baseTheme) ? 4 : 3;
+        int top = "lava".equals(baseTheme) ? baseY + 15 : baseY + 13;
         for (int dx = left; dx <= right; dx++) {
             for (int y = baseY - 2; y <= top; y++) {
                 put(centerX + dx, y, z, Blocks.AIR);
@@ -802,9 +1177,9 @@ public final class CourseBuilder {
     }
 
     private void clearHeadroom(int centerX, int floorY, int z) {
-        int left = "lava".equals(theme) ? -3 : -2;
-        int right = "lava".equals(theme) ? 4 : 3;
-        int top = "lava".equals(theme) ? floorY + 6 : floorY + 5;
+        int left = "lava".equals(baseTheme) ? -3 : -2;
+        int right = "lava".equals(baseTheme) ? 4 : 3;
+        int top = "lava".equals(baseTheme) ? floorY + 6 : floorY + 5;
         for (int dx = left; dx <= right; dx++) {
             for (int y = floorY + 1; y <= top; y++) {
                 put(centerX + dx, y, z, Blocks.AIR);
@@ -841,8 +1216,13 @@ public final class CourseBuilder {
     private int[] createHeightProfile(int stage) {
         int[] profile = new int[STAGE_LENGTH / HEIGHT_KEYFRAME_SPACING + 1];
         int previous = 0;
+        int heightBound = switch (templateVariant) {
+            case 3, 10 -> 10;
+            case 4, 9 -> 6;
+            default -> 9;
+        };
         for (int i = 1; i < profile.length - 1; i++) {
-            int value = seededInt(stage, 200 + i, 9);
+            int value = seededInt(stage, 200 + i, heightBound);
             if (value > previous + 4) value = previous + 4;
             if (value < previous - 4) value = Math.max(0, previous - 4);
             profile[i] = value;
@@ -857,7 +1237,11 @@ public final class CourseBuilder {
         List<Integer> candidates = new ArrayList<>();
         for (int candidate : SAFE_GAP_CANDIDATES) candidates.add(candidate);
         List<Integer> selected = new ArrayList<>();
-        int count = 2 + seededInt(stage, 300, 3);
+        int count = switch (templateVariant) {
+            case 4, 9 -> 2;
+            case 8, 10 -> 4;
+            default -> 2 + seededInt(stage, 300, 3);
+        };
         for (int i = 0; i < count && !candidates.isEmpty(); i++) {
             int index = seededInt(stage, 301 + i, candidates.size());
             int value = candidates.remove(index);
@@ -869,12 +1253,15 @@ public final class CourseBuilder {
     }
 
     private int sceneIndex(int stage) {
-        return Math.floorMod(stage + seededInt(0, 400, 10), 10);
+        return Math.floorMod(stage + seededInt(0, 400, 10) + (templateVariant - 1) * 3, 10);
     }
 
     private int seededInt(int stage, int salt, int bound) {
         if (bound <= 1) return 0;
-        long value = mix64(seed ^ ((long) stage * 0x9E3779B97F4A7C15L) ^ ((long) salt * 0xD1B54A32D192ED03L));
+        long value = mix64(seed
+            ^ ((long) templateVariant * 0x94D049BB133111EBL)
+            ^ ((long) stage * 0x9E3779B97F4A7C15L)
+            ^ ((long) salt * 0xD1B54A32D192ED03L));
         return (int) Math.floorMod(value, bound);
     }
 
